@@ -13,14 +13,12 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 
-
 # -------------------------- Settings --------------------------
 DEFAULT_COMPANY = "AL Glazo Interiors and Décor LLC"
-DEFAULT_TITLE = "Pay slip"
+DEFAULT_TITLE = "PAYSLIP"          # PDF heading text
 DEFAULT_DAYS_IN_MONTH = 30
 PAGE_SIZES = {"A4": A4, "Letter": LETTER}
-FOOTER_SPACER_PT = 48  # increase to move footer lower
-
+FOOTER_SPACER_PT = 48              # move footer lower (increase if needed)
 
 # -------------------------- Helpers --------------------------
 def clean(s):
@@ -34,7 +32,7 @@ def parse_number(x):
     if s in ["", "-", "–"]:
         return None
     s = s.replace(",", "")
-    m = re.fullmatch(r"\((\d+(\.\d+)?)\)", s)
+    m = re.fullmatch(r"\((\d+(\.\d+)?)\)", s)  # (100) -> -100
     if m:
         s = "-" + m.group(1)
     try:
@@ -115,7 +113,6 @@ def calc_totals(row, days_in_month):
 
     return fmt_amount(te_v), fmt_amount(td_v), fmt_amount(np_v), fmt_amount(ap)
 
-
 # -------------------------- PDF builder --------------------------
 def build_pdf_for_row(row, company_name, title, page_size, days_in_month) -> bytes:
     buf = io.BytesIO()
@@ -138,7 +135,7 @@ def build_pdf_for_row(row, company_name, title, page_size, days_in_month) -> byt
     elems.append(Paragraph(company_name, company_style))
     elems.append(Spacer(1, 8))
 
-    # Header (Label | Value)
+    # Header table (Label | Value)
     hdr_rows = [
         ["Employee Name", clean(row.get("Employee Name", ""))],
         ["Employee Code", clean(row.get("Employee Code", ""))],
@@ -146,7 +143,7 @@ def build_pdf_for_row(row, company_name, title, page_size, days_in_month) -> byt
         ["Designation",   clean(row.get("Designation", ""))],
         ["Absent Days",   clean(row.get("Absent Days", ""))],
     ]
-    hdr_tbl = Table(hdr_rows, colWidths=[2.0*inch, None])
+    hdr_tbl = Table(hdr_rows, colWidths=[2.0 * inch, None])
     hdr_tbl.setStyle(TableStyle([
         ("FONTNAME", (0,0), (-1,-1), "Helvetica"),
         ("FONTSIZE", (0,0), (-1,-1), 11),
@@ -158,7 +155,7 @@ def build_pdf_for_row(row, company_name, title, page_size, days_in_month) -> byt
     elems.append(hdr_tbl)
     elems.append(Spacer(1, 8))
 
-    # Earnings / Deductions
+    # Earnings / Deductions table
     overtime_header = "Over time" if "Over time" in row.index else ("Overtime" if "Overtime" in row.index else "Over time")
     earnings_order = [
         ("Basic Pay", "Basic Pay"),
@@ -183,7 +180,7 @@ def build_pdf_for_row(row, company_name, title, page_size, days_in_month) -> byt
             lbl, xl = earnings_order[i]
             Llbl = lbl
             Lval = fmt_amount(row.get(xl, ""))
-        if i < len(deductions_order):  # <-- FIXED (removed extra ')')
+        if i < len(deductions_order):
             lbl, xl = deductions_order[i]
             Rlbl = lbl
             val = row.get(xl, "")
@@ -237,30 +234,20 @@ def build_pdf_for_row(row, company_name, title, page_size, days_in_month) -> byt
     buf.seek(0)
     return buf.read()
 
-
 # -------------------------- Streamlit UI --------------------------
-st.set_page_config(page_title="Payslip Mail-Merge → PDF", page_icon="🧾", layout="centered")
+st.set_page_config(page_title="PAYSLIP", page_icon="🧾", layout="centered")  # browser tab title
+st.title("PAYSLIP")  # main heading
 
-st.title("🧾 Payslip Mail-Merge (Streamlit)")
-st.caption("Upload your Excel, set options, and download a ZIP of generated PDF payslips.")
-
+# Settings bar
 with st.expander("Settings", expanded=True):
-    colA, colB, colC, colD = st.columns([2, 1, 1, 1])
+    colA, colB, colC = st.columns([2, 1, 1])
     company_name = colA.text_input("Company name", value=DEFAULT_COMPANY)
-    title = colB.text_input("Document title", value=DEFAULT_TITLE)
-    days_in_month = colC.number_input("Days in month", min_value=1, max_value=31, value=DEFAULT_DAYS_IN_MONTH, step=1)
-    page_size_label = colD.selectbox("Page size", list(PAGE_SIZES.keys()), index=0)
+    days_in_month = colB.number_input("Days in month", min_value=1, max_value=31, value=DEFAULT_DAYS_IN_MONTH, step=1)
+    page_size_label = colC.selectbox("Page size", list(PAGE_SIZES.keys()), index=0)
+    # PDF document heading (kept editable; default = PAYSLIP)
+    title = st.text_input("PDF heading text", value=DEFAULT_TITLE)
 
-st.markdown(
-    "**Required Excel headers**: `Employee Code`, `Employee Name`  \n"
-    "**Optional**: `Pay Period`, `Designation`, `Absent Days`, "
-    "`Basic Pay`, `Other Allowance`, `Housing Allowance`, `Over time` (or `Overtime`), "
-    "`Reward (Full Day Attendance)`, `Incentive`, `Absent Pay (Deduction)`, "
-    "`Salary Advance (Deduction)`, `Ticket / Other Ded. (Deduction)`, "
-    "`Extra Leave / Punishment (Deduction)`, `Total Earnings (optional)`, "
-    "`Total Deductions (optional)`, `Net Pay (optional)`"
-)
-
+# Move help & template to collapsed sidebar (kept off the main dashboard)
 def make_template_xlsx() -> bytes:
     cols = [
         "Employee Code","Employee Name","Pay Period","Designation","Absent Days",
@@ -281,25 +268,34 @@ def make_template_xlsx() -> bytes:
     bio.seek(0)
     return bio.read()
 
-st.download_button(
-    "⬇️ Download Excel template",
-    data=make_template_xlsx(),
-    file_name="Payslip_Input_Template.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-)
+with st.sidebar.expander("Help & Template", expanded=False):
+    st.markdown(
+        "**Required Excel headers**: `Employee Code`, `Employee Name`  \n"
+        "**Optional**: `Pay Period`, `Designation`, `Absent Days`, "
+        "`Basic Pay`, `Other Allowance`, `Housing Allowance`, `Over time` (or `Overtime`), "
+        "`Reward (Full Day Attendance)`, `Incentive`, `Absent Pay (Deduction)`, "
+        "`Salary Advance (Deduction)`, `Ticket / Other Ded. (Deduction)`, "
+        "`Extra Leave / Punishment (Deduction)`, `Total Earnings (optional)`, "
+        "`Total Deductions (optional)`, `Net Pay (optional)`"
+    )
+    st.download_button(
+        "⬇️ Download Excel template",
+        data=make_template_xlsx(),
+        file_name="Payslip_Input_Template.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
+# Upload Excel
 excel_file = st.file_uploader("Upload Excel (.xlsx)", type=["xlsx"])
 if excel_file:
     df = pd.read_excel(excel_file)
     df.columns = [str(c).strip() for c in df.columns]
-
     missing = [c for c in ["Employee Code", "Employee Name"] if c not in df.columns]
     if missing:
         st.error(f"Missing required columns: {missing}")
     else:
         st.success(f"Loaded {len(df)} rows.")
         st.dataframe(df.head(10))
-
         if st.button("Generate PDFs"):
             zbuf = io.BytesIO()
             with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:

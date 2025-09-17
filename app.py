@@ -1,4 +1,6 @@
-import io, re, zipfile
+import io
+import re
+import zipfile
 from datetime import datetime
 
 import pandas as pd
@@ -17,30 +19,40 @@ DEFAULT_COMPANY = "AL Glazo Interiors and Décor LLC"
 DEFAULT_TITLE = "Pay slip"
 DEFAULT_DAYS_IN_MONTH = 30
 PAGE_SIZES = {"A4": A4, "Letter": LETTER}
-FOOTER_SPACER_PT = 48  # move footer down (increase to push further)
+FOOTER_SPACER_PT = 48  # increase to move footer lower
 
 
 # -------------------------- Helpers --------------------------
-def clean(s): return re.sub(r"\s+", " ", str(s).strip())
+def clean(s):
+    return re.sub(r"\s+", " ", str(s).strip())
 
 def parse_number(x):
-    if x is None: return None
+    """float or None. Accepts '1,200.50', '-100', '(100)'."""
+    if x is None:
+        return None
     s = str(x).strip()
-    if s in ["", "-", "–"]: return None
+    if s in ["", "-", "–"]:
+        return None
     s = s.replace(",", "")
     m = re.fullmatch(r"\((\d+(\.\d+)?)\)", s)
-    if m: s = "-" + m.group(1)
-    try: return float(s)
-    except: return None
+    if m:
+        s = "-" + m.group(1)
+    try:
+        return float(s)
+    except:
+        return None
 
 def fmt_amount(x):
+    """int if whole, else up to 2 dp, no commas."""
     v = parse_number(x) if not isinstance(x, (int, float)) else float(x)
-    if v is None: return ""
+    if v is None:
+        return ""
     return f"{int(v)}" if abs(v - int(v)) < 1e-9 else re.sub(r"\.?0+$", "", f"{v:.2f}")
 
 def amount_in_words(x):
     v = parse_number(x)
-    if v is None: return ""
+    if v is None:
+        return ""
     sign = "minus " if v < 0 else ""
     v = abs(v)
     whole = int(v)
@@ -55,14 +67,18 @@ def safe_filename(s):
     return re.sub(r"\s+", " ", s) or "Payslip"
 
 def auto_absent_pay(row, days_in_month):
+    """If 'Absent Pay (Deduction)' is blank, derive from Basic Pay and Absent Days."""
     ap = parse_number(row.get("Absent Pay (Deduction)", ""))
-    if ap is not None: return ap
+    if ap is not None:
+        return ap
     basic = parse_number(row.get("Basic Pay", ""))
     days = parse_number(row.get("Absent Days", ""))
-    if basic is None or days is None: return None
+    if basic is None or days is None:
+        return None
     return round(basic / float(days_in_month) * days, 2)
 
 def calc_totals(row, days_in_month):
+    """Compute Total Earnings, Total Deductions, Net Pay (if not provided)."""
     ot_header = "Over time" if "Over time" in row.index else ("Overtime" if "Overtime" in row.index else None)
     earn_cols = ["Basic Pay", "Other Allowance", "Housing Allowance", ot_header,
                  "Reward (Full Day Attendance)", "Incentive"]
@@ -72,20 +88,30 @@ def calc_totals(row, days_in_month):
 
     r = row.copy()
     ap = auto_absent_pay(r, days_in_month)
-    if ap is not None: r["Absent Pay (Deduction)"] = ap
+    if ap is not None:
+        r["Absent Pay (Deduction)"] = ap
 
     def total(cols):
-        s = 0.0; used = False
+        s = 0.0
+        used = False
         for c in cols:
             if c in r.index:
-                v = parse_number(r[c]); 
-                if v is not None: s += v; used = True
+                v = parse_number(r[c])
+                if v is not None:
+                    s += v
+                    used = True
         return 0.0 if not used else s
 
-    te_v = parse_number(r.get("Total Earnings (optional)", "")) or total(earn_cols)
-    td_v = parse_number(r.get("Total Deductions (optional)", "")) or total(ded_cols)
+    te_v = parse_number(r.get("Total Earnings (optional)", ""))
+    td_v = parse_number(r.get("Total Deductions (optional)", ""))
+    if te_v is None:
+        te_v = total(earn_cols)
+    if td_v is None:
+        td_v = total(ded_cols)
+
     np_v = parse_number(r.get("Net Pay (optional)", ""))
-    if np_v is None: np_v = te_v - td_v
+    if np_v is None:
+        np_v = te_v - td_v
 
     return fmt_amount(te_v), fmt_amount(td_v), fmt_amount(np_v), fmt_amount(ap)
 
@@ -94,9 +120,12 @@ def calc_totals(row, days_in_month):
 def build_pdf_for_row(row, company_name, title, page_size, days_in_month) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
-        buf, pagesize=page_size,
-        leftMargin=0.6*inch, rightMargin=0.6*inch,
-        topMargin=0.6*inch, bottomMargin=0.6*inch
+        buf,
+        pagesize=page_size,
+        leftMargin=0.6 * inch,
+        rightMargin=0.6 * inch,
+        topMargin=0.6 * inch,
+        bottomMargin=0.6 * inch,
     )
 
     styles = getSampleStyleSheet()
@@ -109,7 +138,7 @@ def build_pdf_for_row(row, company_name, title, page_size, days_in_month) -> byt
     elems.append(Paragraph(company_name, company_style))
     elems.append(Spacer(1, 8))
 
-    # Header table (2 cols)
+    # Header (Label | Value)
     hdr_rows = [
         ["Employee Name", clean(row.get("Employee Name", ""))],
         ["Employee Code", clean(row.get("Employee Code", ""))],
@@ -129,7 +158,7 @@ def build_pdf_for_row(row, company_name, title, page_size, days_in_month) -> byt
     elems.append(hdr_tbl)
     elems.append(Spacer(1, 8))
 
-    # Earnings / Deductions table
+    # Earnings / Deductions
     overtime_header = "Over time" if "Over time" in row.index else ("Overtime" if "Overtime" in row.index else "Over time")
     earnings_order = [
         ("Basic Pay", "Basic Pay"),
@@ -151,13 +180,17 @@ def build_pdf_for_row(row, company_name, title, page_size, days_in_month) -> byt
     for i in range(max_rows):
         Llbl = Lval = Rlbl = Rval = ""
         if i < len(earnings_order):
-            lbl, xl = earnings_order[i]; Llbl = lbl; Lval = fmt_amount(row.get(xl, ""))
-        if i < len(deductions_order)):
-            lbl, xl = deductions_order[i]; Rlbl = lbl
+            lbl, xl = earnings_order[i]
+            Llbl = lbl
+            Lval = fmt_amount(row.get(xl, ""))
+        if i < len(deductions_order):  # <-- FIXED (removed extra ')')
+            lbl, xl = deductions_order[i]
+            Rlbl = lbl
             val = row.get(xl, "")
             if xl == "Absent Pay (Deduction)":
                 ap = auto_absent_pay(row, days_in_month)
-                if ap is not None: val = ap
+                if ap is not None:
+                    val = ap
             Rval = fmt_amount(val)
         rows.append([Llbl, Lval, Rlbl, Rval])
 
@@ -165,7 +198,7 @@ def build_pdf_for_row(row, company_name, title, page_size, days_in_month) -> byt
     rows.append(["Total Earnings", te, "Total Deductions", td])
     rows.append(["", "", "Net Pay", np_])
 
-    col_widths = [2.6*inch, 1.2*inch, 2.9*inch, 1.2*inch]
+    col_widths = [2.6 * inch, 1.2 * inch, 2.9 * inch, 1.2 * inch]
     tbl = Table(rows, colWidths=col_widths, repeatRows=1)
     tbl.setStyle(TableStyle([
         ("FONTNAME", (0,0), (-1,-1), "Helvetica"),
@@ -183,15 +216,15 @@ def build_pdf_for_row(row, company_name, title, page_size, days_in_month) -> byt
     ]))
     elems.append(tbl)
 
-    # ---- NEW: Net to pay (in words) just under the table ----
+    # Net to pay (in words)
     elems.append(Spacer(1, 12))
     np_words = amount_in_words(np_)
     if np_words:
         elems.append(Paragraph(f"<b>Net to pay (in words):</b> {np_words}", label_style))
 
-    # ---- Move footer down a bit ----
+    # Footer moved downward
     elems.append(Spacer(1, FOOTER_SPACER_PT))
-    foot = Table([["Accounts", "Employee Signature"]], colWidths=[3.5*inch, 3.5*inch])
+    foot = Table([["Accounts", "Employee Signature"]], colWidths=[3.5 * inch, 3.5 * inch])
     foot.setStyle(TableStyle([
         ("FONTNAME", (0,0), (-1,-1), "Helvetica"),
         ("FONTSIZE", (0,0), (-1,-1), 11),
@@ -207,14 +240,15 @@ def build_pdf_for_row(row, company_name, title, page_size, days_in_month) -> byt
 
 # -------------------------- Streamlit UI --------------------------
 st.set_page_config(page_title="Payslip Mail-Merge → PDF", page_icon="🧾", layout="centered")
+
 st.title("🧾 Payslip Mail-Merge (Streamlit)")
 st.caption("Upload your Excel, set options, and download a ZIP of generated PDF payslips.")
 
 with st.expander("Settings", expanded=True):
-    colA, colB, colC, colD = st.columns([2,1,1,1])
+    colA, colB, colC, colD = st.columns([2, 1, 1, 1])
     company_name = colA.text_input("Company name", value=DEFAULT_COMPANY)
     title = colB.text_input("Document title", value=DEFAULT_TITLE)
-    days_in_month = colC.number_input("Days in month", 1, 31, value=DEFAULT_DAYS_IN_MONTH, step=1)
+    days_in_month = colC.number_input("Days in month", min_value=1, max_value=31, value=DEFAULT_DAYS_IN_MONTH, step=1)
     page_size_label = colD.selectbox("Page size", list(PAGE_SIZES.keys()), index=0)
 
 st.markdown(
@@ -236,12 +270,16 @@ def make_template_xlsx() -> bytes:
         "Ticket / Other Ded. (Deduction)","Extra Leave / Punishment (Deduction)",
         "Total Earnings (optional)","Total Deductions (optional)","Net Pay (optional)"
     ]
-    data = [["AG-0213","AJIT KUMAR AJABDAYAL RAM","AUGUST 2025","FITTER",0,1200,300,"",325,100,0,"","","","", "", "", ""],
-            ["AG-0401","RAHUL SHARMA","AUGUST 2025","ELECTRICIAN",1,1500,250,300,200,0,50,"100",0,0,0,"","",""]]
+    data = [
+        ["AG-0213","AJIT KUMAR AJABDAYAL RAM","AUGUST 2025","FITTER",0,1200,300,"",325,100,0,"","","","", "", "", ""],
+        ["AG-0401","RAHUL SHARMA","AUGUST 2025","ELECTRICIAN",1,1500,250,300,200,0,50,"100",0,0,0,"","",""],
+    ]
     df = pd.DataFrame(data, columns=cols)
     bio = io.BytesIO()
-    with pd.ExcelWriter(bio, engine="openpyxl") as w: df.to_excel(w, index=False, sheet_name="Data")
-    bio.seek(0); return bio.read()
+    with pd.ExcelWriter(bio, engine="openpyxl") as w:
+        df.to_excel(w, index=False, sheet_name="Data")
+    bio.seek(0)
+    return bio.read()
 
 st.download_button(
     "⬇️ Download Excel template",
@@ -252,17 +290,21 @@ st.download_button(
 
 excel_file = st.file_uploader("Upload Excel (.xlsx)", type=["xlsx"])
 if excel_file:
-    df = pd.read_excel(excel_file); df.columns = [str(c).strip() for c in df.columns]
-    missing = [c for c in ["Employee Code","Employee Name"] if c not in df.columns]
+    df = pd.read_excel(excel_file)
+    df.columns = [str(c).strip() for c in df.columns]
+
+    missing = [c for c in ["Employee Code", "Employee Name"] if c not in df.columns]
     if missing:
         st.error(f"Missing required columns: {missing}")
     else:
-        st.success(f"Loaded {len(df)} rows."); st.dataframe(df.head(10))
+        st.success(f"Loaded {len(df)} rows.")
+        st.dataframe(df.head(10))
+
         if st.button("Generate PDFs"):
             zbuf = io.BytesIO()
             with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:
                 page_size = PAGE_SIZES[page_size_label]
-                prog = st.progress(0)
+                prog = st.progress(0.0)
                 for i, (_, row) in enumerate(df.iterrows(), start=1):
                     try:
                         pdf_bytes = build_pdf_for_row(row, company_name, title, page_size, days_in_month)
@@ -272,10 +314,12 @@ if excel_file:
                         zf.writestr(f"{fname}.pdf", pdf_bytes)
                     except Exception as e:
                         zf.writestr(f"row_{i}_ERROR.txt", f"Row {i}: {e}")
-                    prog.progress(i/len(df))
+                    prog.progress(i / len(df))
             zbuf.seek(0)
             run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
-            st.download_button("⬇️ Download ZIP of PDFs",
-                               data=zbuf.read(),
-                               file_name=f"Payslips_PDF_{run_id}.zip",
-                               mime="application/zip")
+            st.download_button(
+                "⬇️ Download ZIP of PDFs",
+                data=zbuf.read(),
+                file_name=f"Payslips_PDF_{run_id}.zip",
+                mime="application/zip",
+            )

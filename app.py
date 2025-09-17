@@ -19,7 +19,8 @@ DEFAULT_TITLE = "PAYSLIP"          # PDF heading text
 DEFAULT_DAYS_IN_MONTH = 30
 PAGE_SIZES = {"A4": A4, "Letter": LETTER}
 FOOTER_SPACER_PT = 48              # move signature row lower (increase if needed)
-UI_POWERED_BY_TEXT = 'Powered By <b>Jaseer</b>'  # UI-only footer
+PDF_POWERED_BY_TEXT = 'Powered BY "JASEER"'  # footer line inside PDF
+UI_POWERED_BY_TEXT = 'Powered BY <b>"JASEER"</b>'  # footer line in Streamlit UI (HTML)
 
 # -------------------------- Helpers --------------------------
 def clean(s):
@@ -130,6 +131,7 @@ def build_pdf_for_row(row, company_name, title, page_size, days_in_month) -> byt
     title_style = ParagraphStyle("TitleBig", parent=styles["Title"], fontSize=18, leading=22, alignment=1)
     company_style = ParagraphStyle("Company", parent=styles["Heading2"], fontSize=14, leading=18, alignment=1)
     label_style = ParagraphStyle("Label", parent=styles["Normal"], fontSize=11, leading=14)
+    tiny_center = ParagraphStyle("TinyCenter", parent=styles["Normal"], fontSize=9, leading=11, alignment=1, textColor=colors.grey)
 
     elems = []
     elems.append(Paragraph(title, title_style))
@@ -220,7 +222,7 @@ def build_pdf_for_row(row, company_name, title, page_size, days_in_month) -> byt
     if np_words:
         elems.append(Paragraph(f"<b>Net to pay (in words):</b> {np_words}", label_style))
 
-    # Signature row (no powered-by in PDF)
+    # Signature row + powered-by footer
     elems.append(Spacer(1, FOOTER_SPACER_PT))
     foot = Table([["Accounts", "Employee Signature"]], colWidths=[3.5 * inch, 3.5 * inch])
     foot.setStyle(TableStyle([
@@ -230,6 +232,10 @@ def build_pdf_for_row(row, company_name, title, page_size, days_in_month) -> byt
         ("ALIGN", (1,0), (1,0), "RIGHT"),
     ]))
     elems.append(foot)
+
+    # --- PDF footer line: Powered BY "JASEER" ---
+    elems.append(Spacer(1, 6))
+    elems.append(Paragraph(PDF_POWERED_BY_TEXT, tiny_center))
 
     doc.build(elems)
     buf.seek(0)
@@ -275,11 +281,11 @@ if excel_file:
             st.download_button(
                 "⬇️ Download ZIP of PDFs",
                 data=zbuf.read(),
-                file_name=f"Payslips_PDF_{RUN_ID}.zip".replace("{RUN_ID}", run_id),
+                file_name=f"Payslips_PDF_{run_id}.zip",
                 mime="application/zip",
             )
 
-# --- UI footer: Powered By Jaseer (fixed at page bottom; NOT in PDFs) ---
+# --- UI footer: Powered BY "JASEER" (fixed at page bottom) ---
 st.markdown(
     """
     <style>

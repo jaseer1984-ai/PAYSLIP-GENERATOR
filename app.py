@@ -235,57 +235,16 @@ def build_pdf_for_row(row, company_name, title, page_size, days_in_month) -> byt
     return buf.read()
 
 # -------------------------- Streamlit UI --------------------------
-st.set_page_config(page_title="PAYSLIP", page_icon="🧾", layout="centered")  # browser tab title
-st.title("PAYSLIP")  # main heading
+st.set_page_config(page_title="PAYSLIP", page_icon="🧾", layout="centered")
+st.title("PAYSLIP")
 
-# Settings bar
 with st.expander("Settings", expanded=True):
     colA, colB, colC = st.columns([2, 1, 1])
     company_name = colA.text_input("Company name", value=DEFAULT_COMPANY)
     days_in_month = colB.number_input("Days in month", min_value=1, max_value=31, value=DEFAULT_DAYS_IN_MONTH, step=1)
     page_size_label = colC.selectbox("Page size", list(PAGE_SIZES.keys()), index=0)
-    # PDF document heading (kept editable; default = PAYSLIP)
     title = st.text_input("PDF heading text", value=DEFAULT_TITLE)
 
-# Move help & template to collapsed sidebar (kept off the main dashboard)
-def make_template_xlsx() -> bytes:
-    cols = [
-        "Employee Code","Employee Name","Pay Period","Designation","Absent Days",
-        "Basic Pay","Other Allowance","Housing Allowance","Over time",
-        "Reward (Full Day Attendance)","Incentive",
-        "Absent Pay (Deduction)","Salary Advance (Deduction)",
-        "Ticket / Other Ded. (Deduction)","Extra Leave / Punishment (Deduction)",
-        "Total Earnings (optional)","Total Deductions (optional)","Net Pay (optional)"
-    ]
-    data = [
-        ["AG-0213","AJIT KUMAR AJABDAYAL RAM","AUGUST 2025","FITTER",0,1200,300,"",325,100,0,"","","","", "", "", ""],
-        ["AG-0401","RAHUL SHARMA","AUGUST 2025","ELECTRICIAN",1,1500,250,300,200,0,50,"100",0,0,0,"","",""],
-    ]
-    df = pd.DataFrame(data, columns=cols)
-    bio = io.BytesIO()
-    with pd.ExcelWriter(bio, engine="openpyxl") as w:
-        df.to_excel(w, index=False, sheet_name="Data")
-    bio.seek(0)
-    return bio.read()
-
-with st.sidebar.expander("Help & Template", expanded=False):
-    st.markdown(
-        "**Required Excel headers**: `Employee Code`, `Employee Name`  \n"
-        "**Optional**: `Pay Period`, `Designation`, `Absent Days`, "
-        "`Basic Pay`, `Other Allowance`, `Housing Allowance`, `Over time` (or `Overtime`), "
-        "`Reward (Full Day Attendance)`, `Incentive`, `Absent Pay (Deduction)`, "
-        "`Salary Advance (Deduction)`, `Ticket / Other Ded. (Deduction)`, "
-        "`Extra Leave / Punishment (Deduction)`, `Total Earnings (optional)`, "
-        "`Total Deductions (optional)`, `Net Pay (optional)`"
-    )
-    st.download_button(
-        "⬇️ Download Excel template",
-        data=make_template_xlsx(),
-        file_name="Payslip_Input_Template.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
-# Upload Excel
 excel_file = st.file_uploader("Upload Excel (.xlsx)", type=["xlsx"])
 if excel_file:
     df = pd.read_excel(excel_file)
@@ -295,7 +254,6 @@ if excel_file:
         st.error(f"Missing required columns: {missing}")
     else:
         st.success(f"Loaded {len(df)} rows.")
-        st.dataframe(df.head(10))
         if st.button("Generate PDFs"):
             zbuf = io.BytesIO()
             with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:

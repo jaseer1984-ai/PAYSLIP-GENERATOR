@@ -2,7 +2,7 @@ import io
 import re
 import zipfile
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
@@ -77,10 +77,11 @@ def parse_number(x):
     try:
         return float(s)
     except:
+        # accept HH:MM[:SS] as hours
         if re.fullmatch(r"\d{1,2}:\d{2}(:\d{2})?", s):
             parts = s.split(":")
-            h = int(parts[0]); m = int(parts[1]); sec = int(parts[2]) if len(parts)==3 else 0
-            return h + m/60 + sec/3600
+            h = int(parts[0]); m2 = int(parts[1]); sec = int(parts[2]) if len(parts)==3 else 0
+            return h + m2/60 + sec/3600
         return None
 
 def fmt_amount(x, decimals=2):
@@ -377,6 +378,7 @@ st.subheader("Overtime Report (Daily > 8 hours)")
 att_file = st.file_uploader("Upload Attendance Excel (.xlsx)", type=["xlsx"], key="attendance")
 ot_threshold = st.number_input("Daily threshold (hours)", min_value=0.0, max_value=24.0, value=8.0, step=0.5)
 
+# ---------- helpers for wide attendance ----------
 def norm_cols_map(columns):
     return {str(c).strip().lower(): c for c in columns}
 
@@ -391,6 +393,7 @@ def pick_col(norm_map, *candidates):
     return None
 
 def parse_hours_cell(x):
+    """Return hours as float; accepts numbers, '8:30', '8h 30m', 'OFF', '-', blanks."""
     if pd.isna(x):
         return None
     if isinstance(x, (int, float)):
@@ -398,10 +401,12 @@ def parse_hours_cell(x):
     s = str(x).strip()
     if s == "" or s.lower() in {"off","a","absent","leave","holiday","-","--"}:
         return None
+    # HH:MM[:SS]
     if re.fullmatch(r"\d{1,2}:\d{2}(:\d{2})?", s):
-        parts = s.split(":")
-        h = int(parts[0]); m = int(parts[1]); sec = int(parts[2]) if len(parts)==3 else 0
-        return h + m/60 + sec/3600
+        h, m, *rest = s.split(":")
+        sec = int(rest[0]) if rest else 0
+        return int(h) + int(m)/60 + sec/3600
+    # 8h 30m or 8 Hrs
     m = re.search(r"(\d+(\.\d+)?)\s*h", s, re.I)
     if m:
         hours = float(m.group(1))
@@ -414,25 +419,83 @@ def parse_hours_cell(x):
     except:
         return None
 
+def coerce_day_label(val):
+    """
+    Try to turn a header value into a day int 1..31.
+    Accepts '1', '01', '1.0', '1 ', '1-Sep', etc.
+    """
+    if pd.isna(val):
+        return None
+    s = str(val).strip()
+    # numeric-like
+    try:
+        f = float(s)
+        i = int(f)
+        if 1 <= i <= 31:
+            return i
+    except:
+        pass
+    # leading digits
+    m = re.match(r"^\s*(\d{1,2})\b", s)
+    if m:
+        i = int(m.group(1))
+        if 1 <= i <= 31:
+            return i
+    return None
+
+def detect_day_columns_from_headers(df):
+    day_cols = []
+    for c in df.columns:
+        if coerce_day_label(c) is not None:
+            day_cols.append(c)
+    return day_cols
+
+def promote_day_header_if_needed(df, look_first_rows=6):
+    """
+    If day columns 1..31 are not in the column names, scan the first few rows
+    for a row that contains many day labels. If found, promote that row to header.
+    """
+    day_cols = detect_day_columns_from_headers(df)
+    if day_cols:
+        return df  # already ok
+
+    best_row = None
+    best_count = 0
+    for r in range(min(look_first_rows, len(df))):
+        row_vals = df.iloc[r].tolist()
+        count = sum(1 for v in row_vals if coerce_day_label(v) is not None)
+        if count > best_count:
+            best_count = count
+            best_row = r
+
+    if best_row is not None and best_count >= 5:
+        header_vals = df.iloc[best_row].astype(str).tolist()
+        new_df = df.iloc[best_row+1:].copy()
+        new_df.columns = header_vals
+        new_df.columns = [str(c).strip() for c in new_df.columns]
+        return new_df
+
+    return df  # fallback
+
 def build_ot_report_wide(df_att, month_label=""):
+    df_att = promote_day_header_if_needed(df_att)
+    df_att.columns = [str(c).strip() for c in df_att.columns]
+
     nm = norm_cols_map(df_att.columns)
     name_col = pick_col(nm, "employee name", "name", "emp name", "staff name") or "NAME"
     code_col = pick_col(nm, "employee code", "emp code", "code", "id") or "E CODE"
 
-    day_cols = []
-    for c in df_att.columns:
-        cs = str(c).strip()
-        if re.fullmatch(r"(?:0?[1-9]|[12][0-9]|3[01])", cs):
-            day_cols.append(c)
+    day_cols = detect_day_columns_from_headers(df_att)
     if not day_cols:
         raise ValueError("Could not find day columns 1..31 in the attendance sheet.")
 
-    long = df_att.melt(
-        id_vars=[col for col in [name_col, code_col] if col in df_att.columns],
-        value_vars=day_cols,
-        var_name="Day",
-        value_name="HoursRaw"
-    )
+    id_vars = [c for c in [name_col, code_col] if c in df_att.columns]
+    long = df_att.melt(id_vars=id_vars, value_vars=day_cols, var_name="DayLabel", value_name="HoursRaw")
+
+    long["Day"] = long["DayLabel"].map(coerce_day_label)
+    long.dropna(subset=["Day"], inplace=True)
+    long["Day"] = long["Day"].astype(int)
+
     long["Hours"] = long["HoursRaw"].map(parse_hours_cell)
     long["OT_Hours"] = (long["Hours"] - ot_threshold).clip(lower=0)
     long["Has_OT"] = long["OT_Hours"] > 0
@@ -482,12 +545,12 @@ def monthly_totals(summary_raw: pd.DataFrame, daily_long: pd.DataFrame, month_la
         "Avg_Work_Hours_per_Day": round(avg_work_per_day, 2),
     }])
 
+# ---------- run the OT report ----------
 if att_file:
     try:
         xls2 = pd.ExcelFile(att_file)
         att_sheet = xls2.sheet_names[0]
         df_att = pd.read_excel(xls2, sheet_name=att_sheet, header=0)
-        df_att.columns = [str(c).strip() for c in df_att.columns]
         st.success(f"Attendance loaded from sheet '{att_sheet}' with {len(df_att)} rows.")
 
         summary_raw, summary_disp, daily_long, name_col, code_col = build_ot_report_wide(df_att, month_label=att_sheet)

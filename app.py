@@ -11,26 +11,31 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, LETTER
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
+)
 
 # -------------------------- Settings --------------------------
 DEFAULT_COMPANY = "AL Glazo Interiors and Décor LLC"
-DEFAULT_TITLE = "PAYSLIP"          # PDF heading text
+DEFAULT_TITLE = "PAYSLIP"
 DEFAULT_DAYS_IN_MONTH = 30
 PAGE_SIZES = {"A4": A4, "Letter": LETTER}
-FOOTER_SPACER_PT = 48              # move signature row lower (increase if needed)
+FOOTER_SPACER_PT = 48
 UI_POWERED_BY_TEXT = 'Powered By <b>Jaseer</b>'  # UI-only footer
 
 # -------------------------- Helpers --------------------------
 def clean(s):
+    """Trim spaces and hide NaN/None."""
+    if s is None or (isinstance(s, float) and pd.isna(s)):
+        return ""
     return re.sub(r"\s+", " ", str(s).strip())
 
 def parse_number(x):
-    """float or None. Accepts '1,200.50', '-100', '(100)'."""
-    if x is None:
+    """float or None. Accepts '1,200.50', '-100', '(100)'. Returns None if blank/invalid."""
+    if x is None or (isinstance(x, float) and pd.isna(x)):
         return None
     s = str(x).strip()
-    if s in ["", "-", "–"]:
+    if s in ["", "-", "–", "nan", "NaN", "None"]:
         return None
     s = s.replace(",", "")
     m = re.fullmatch(r"\((\d+(\.\d+)?)\)", s)  # (100) -> -100
@@ -41,16 +46,26 @@ def parse_number(x):
     except:
         return None
 
-def fmt_amount(x):
-    """int if whole, else up to 2 dp, no commas."""
-    v = parse_number(x) if not isinstance(x, (int, float)) else float(x)
-    if v is None:
-        return ""
+def fmt_amount_basic(x):
+    """Format number with no commas; return '0' for blanks/NaN."""
+    # x might be a real float (including NaN) or a string
+    v = float(x) if isinstance(x, (int, float)) else parse_number(x)
+    if v is None or pd.isna(v):
+        return "0"
     return f"{int(v)}" if abs(v - int(v)) < 1e-9 else re.sub(r"\.?0+$", "", f"{v:.2f}")
 
+def fmt_amount_commas(x, decimals=2):
+    """Format with thousand separators; return '0' for blanks/NaN."""
+    v = float(x) if isinstance(x, (int, float)) else parse_number(x)
+    if v is None or pd.isna(v):
+        return "0"
+    if decimals == 0:
+        return f"{int(round(v)):,}"
+    return f"{v:,.{decimals}f}"
+
 def amount_in_words(x):
-    v = parse_number(x)
-    if v is None:
+    v = float(x) if isinstance(x, (int, float)) else parse_number(x)
+    if v is None or pd.isna(v):
         return ""
     sign = "minus " if v < 0 else ""
     v = abs(v)
@@ -62,7 +77,8 @@ def amount_in_words(x):
     return (sign + words).strip().capitalize() + " only"
 
 def safe_filename(s):
-    s = re.sub(r"[\\/:*?\"<>|]+", " ", str(s)).strip()
+    s = "" if (s is None or (isinstance(s, float) and pd.isna(s))) else str(s)
+    s = re.sub(r"[\\/:*?\"<>|]+", " ", s).strip()
     return re.sub(r"\s+", " ", s) or "Payslip"
 
 def auto_absent_pay(row, days_in_month):
@@ -112,10 +128,17 @@ def calc_totals(row, days_in_month):
     if np_v is None:
         np_v = te_v - td_v
 
-    return fmt_amount(te_v), fmt_amount(td_v), fmt_amount(np_v), fmt_amount(ap)
+    return te_v, td_v, np_v, ap
 
 # -------------------------- PDF builder --------------------------
-def build_pdf_for_row(row, company_name, title, page_size, days_in_month) -> bytes:
+def build_pdf_for_row(
+    row, company_name, title, page_size, days_in_month,
+    logo_bytes=None, logo_width=1.2*inch, use_commas=True, decimals=2,
+    currency_label="SAR", include_words=True
+) -> bytes:
+    # choose formatter
+    fmt = (lambda x: fmt_amount_commas(x, decimals=decimals)) if use_commas else fmt_amount_basic
+
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf,
@@ -132,17 +155,33 @@ def build_pdf_for_row(row, company_name, title, page_size, days_in_month) -> byt
     label_style = ParagraphStyle("Label", parent=styles["Normal"], fontSize=11, leading=14)
 
     elems = []
-    elems.append(Paragraph(title, title_style))
-    elems.append(Paragraph(company_name, company_style))
-    elems.append(Spacer(1, 8))
 
-    # Header table (Label | Value)
+    # Header with optional logo
+    if logo_bytes:
+        img = Image(io.BytesIO(logo_bytes))
+        img._restrictSize(logo_width, logo_width * 1.2)
+        header_tbl = Table(
+            [[img, Paragraph(f"<b>{title}</b><br/>{company_name}", ParagraphStyle("hdr", parent=styles["Normal"], fontSize=14, leading=18, alignment=1))]],
+            colWidths=[logo_width, None],
+        )
+        header_tbl.setStyle(TableStyle([
+            ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+            ("ALIGN", (1,0), (1,0), "CENTER"),
+        ]))
+        elems.append(header_tbl)
+        elems.append(Spacer(1, 8))
+    else:
+        elems.append(Paragraph(title, title_style))
+        elems.append(Paragraph(company_name, company_style))
+        elems.append(Spacer(1, 8))
+
+    # Header table
     hdr_rows = [
         ["Employee Name", clean(row.get("Employee Name", ""))],
         ["Employee Code", clean(row.get("Employee Code", ""))],
         ["Pay Period",    clean(row.get("Pay Period", ""))],
         ["Designation",   clean(row.get("Designation", ""))],
-        ["Absent Days",   clean(row.get("Absent Days", ""))],
+        ["Absent Days",   fmt_amount_basic(row.get("Absent Days", ""))],  # show 0 if blank
     ]
     hdr_tbl = Table(hdr_rows, colWidths=[2.0 * inch, None])
     hdr_tbl.setStyle(TableStyle([
@@ -173,14 +212,14 @@ def build_pdf_for_row(row, company_name, title, page_size, days_in_month) -> byt
         ("Extra Leave Punishment Ded", "Extra Leave / Punishment (Deduction)"),
     ]
 
-    rows = [["Earnings", "Amount", "Deductions", "Amount"]]
+    rows = [[f"Earnings ({currency_label})", "Amount", f"Deductions ({currency_label})", "Amount"]]
     max_rows = max(len(earnings_order), len(deductions_order))
     for i in range(max_rows):
         Llbl = Lval = Rlbl = Rval = ""
         if i < len(earnings_order):
             lbl, xl = earnings_order[i]
             Llbl = lbl
-            Lval = fmt_amount(row.get(xl, ""))
+            Lval = fmt(row.get(xl, ""))
         if i < len(deductions_order):
             lbl, xl = deductions_order[i]
             Rlbl = lbl
@@ -189,14 +228,14 @@ def build_pdf_for_row(row, company_name, title, page_size, days_in_month) -> byt
                 ap = auto_absent_pay(row, days_in_month)
                 if ap is not None:
                     val = ap
-            Rval = fmt_amount(val)
+            Rval = fmt(val)
         rows.append([Llbl, Lval, Rlbl, Rval])
 
     te, td, np_, _ap = calc_totals(row, days_in_month)
-    rows.append(["Total Earnings", te, "Total Deductions", td])
-    rows.append(["", "", "Net Pay", np_])
+    rows.append(["Total Earnings", fmt(te), "Total Deductions", fmt(td)])
+    rows.append(["", "", "Net Pay", fmt(np_)])
 
-    col_widths = [2.6 * inch, 1.2 * inch, 2.9 * inch, 1.2 * inch]
+    col_widths = [2.8 * inch, 1.2 * inch, 2.8 * inch, 1.2 * inch]
     tbl = Table(rows, colWidths=col_widths, repeatRows=1)
     tbl.setStyle(TableStyle([
         ("FONTNAME", (0,0), (-1,-1), "Helvetica"),
@@ -216,9 +255,10 @@ def build_pdf_for_row(row, company_name, title, page_size, days_in_month) -> byt
 
     # Net to pay (in words)
     elems.append(Spacer(1, 12))
-    np_words = amount_in_words(np_)
-    if np_words:
-        elems.append(Paragraph(f"<b>Net to pay (in words):</b> {np_words}", label_style))
+    if include_words and np_ is not None and not pd.isna(np_):
+        np_words = amount_in_words(np_)
+        if np_words:
+            elems.append(Paragraph(f"<b>Net to pay (in words):</b> {np_words}", label_style))
 
     # Signature row
     elems.append(Spacer(1, FOOTER_SPACER_PT))
@@ -246,9 +286,28 @@ with st.expander("Settings", expanded=True):
     page_size_label = colC.selectbox("Page size", list(PAGE_SIZES.keys()), index=0)
     title = st.text_input("PDF heading text", value=DEFAULT_TITLE)
 
+with st.expander("Formatting", expanded=False):
+    c1, c2, c3, c4 = st.columns([1,1,1,1])
+    use_commas = c1.checkbox("Use comma separators", value=True)
+    fixed_decimals = c2.selectbox("Decimal places", options=[0,2], index=1)
+    currency_label = c3.text_input("Currency label", value="SAR")
+    include_words = c4.checkbox("Show amount in words", value=True)
+
+with st.expander("Branding", expanded=False):
+    logo_file = st.file_uploader("Optional logo (PNG/JPG)", type=["png","jpg","jpeg"])
+
 excel_file = st.file_uploader("Upload Excel (.xlsx)", type=["xlsx"])
+
+# Optional: template button (comment out if not using a bundled template file)
+# st.download_button("📥 Download Payslip Template (Excel)", data=open("payslip_template.xlsx","rb").read(), file_name="payslip_template.xlsx")
+
 if excel_file:
-    df = pd.read_excel(excel_file)
+    try:
+        df = pd.read_excel(excel_file)
+    except Exception as e:
+        st.error(f"Failed to read Excel file: {e}")
+        st.stop()
+
     df.columns = [str(c).strip() for c in df.columns]
     missing = [c for c in ["Employee Code", "Employee Name"] if c not in df.columns]
     if missing:
@@ -257,27 +316,53 @@ if excel_file:
         st.success(f"Loaded {len(df)} rows.")
         if st.button("Generate PDFs"):
             zbuf = io.BytesIO()
+            page_size = PAGE_SIZES[page_size_label]
+            prog = st.progress(0.0)
+
+            logo_bytes = None
+            if logo_file:
+                logo_bytes = logo_file.read()
+
+            errors = []
             with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:
-                page_size = PAGE_SIZES[page_size_label]
-                prog = st.progress(0.0)
+                total = len(df)
                 for i, (_, row) in enumerate(df.iterrows(), start=1):
                     try:
-                        pdf_bytes = build_pdf_for_row(row, company_name, title, page_size, days_in_month)
+                        pdf_bytes = build_pdf_for_row(
+                            row=row,
+                            company_name=company_name,
+                            title=title,
+                            page_size=page_size,
+                            days_in_month=days_in_month,
+                            logo_bytes=logo_bytes,
+                            use_commas=use_commas,
+                            decimals=fixed_decimals,
+                            currency_label=currency_label,
+                            include_words=include_words,
+                        )
                         emp_code = safe_filename(row.get("Employee Code", ""))
                         emp_name = safe_filename(row.get("Employee Name", ""))
                         fname = f"{emp_code} - {emp_name}".strip() or f"Payslip_{i}"
                         zf.writestr(f"{fname}.pdf", pdf_bytes)
                     except Exception as e:
-                        zf.writestr(f"row_{i}_ERROR.txt", f"Row {i}: {e}")
-                    prog.progress(i / len(df))
+                        err_name = f"row_{i}_ERROR.txt"
+                        zf.writestr(err_name, f"Row {i}: {e}")
+                        errors.append((i, str(e)))
+                    prog.progress(i / max(1, total))
+
             zbuf.seek(0)
             run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
             st.download_button(
                 "⬇️ Download ZIP of PDFs",
                 data=zbuf.read(),
-                file_name=f"Payslips_PDF_{run_id}.zip",  # <-- FIXED: use run_id
+                file_name=f"Payslips_PDF_{run_id}.zip",
                 mime="application/zip",
             )
+
+            if errors:
+                st.warning(f"{len(errors)} rows had issues. An error file per row was added to the ZIP.")
+else:
+    st.info("Upload an Excel file to generate payslip PDFs.")
 
 # --- UI footer: Powered By Jaseer (NOT in PDFs) ---
 st.markdown(

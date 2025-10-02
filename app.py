@@ -18,14 +18,22 @@ from openpyxl.utils.cell import column_index_from_string
 DEFAULT_COMPANY = "AL Glazo Interiors and Décor LLC"
 DEFAULT_TITLE = "PAYSLIP"
 PAGE_SIZES = {"A4 (Landscape)": landscape(A4), "Letter (Landscape)": landscape(LETTER)}
-FOOTER_SPACER_PT = 80  # move Accounts/Employee Signature lower
+FOOTER_SPACER_PT = 80
 UI_POWERED_BY_TEXT = 'Powered By <b>Jaseer</b>'
 
-# ---- Text columns in your sheet ----
-EMP_CODE_COL_NAME = "CODE"
-EMP_NAME_COL_NAME = "NAME"
-DESIGNATION_COL_NAME = "Proffession"
-ABSENT_DAYS_COL_NAMES = ["LEAVE/DAYS", "LEAVE"]  # tries in order
+# ---- Fuzzy header candidates (case-insensitive) ----
+EMP_NAME_CANDIDATES = [
+    "name","employee name","emp name","staff name","worker name"
+]
+EMP_CODE_CANDIDATES = [
+    "code","employee code","emp code","emp id","employee id","id","staff id","worker id"
+]
+DESIGNATION_CANDIDATES = [
+    "designation","title","position","proffession","profession","job title"
+]
+ABSENT_DAYS_CANDIDATES = [
+    "leave/days","leave days","absent days","absent","leave"
+]
 
 # ---- Amount mapping by Excel LETTER (your spec) ----
 EARNINGS_LETTERS = {
@@ -93,7 +101,7 @@ def amount_in_words(x):
 def safe_filename(s):
     s = "" if (s is None or (isinstance(s, float) and pd.isna(s))) else str(s)
     s = re.sub(r"[\\/:*?\"<>|]+", " ", s).strip()
-    return re.sub(r"\s+", " ", s) or "Payslip"
+    return re.sub(r"\s+", " ", s) or ""
 
 def letter_value(row_values, letter):
     try:
@@ -114,13 +122,27 @@ def sum_letters(row_values, letters):
             any_val = True
     return total if any_val else 0.0
 
-def extract_absent_days(row):
-    for col in ABSENT_DAYS_COL_NAMES:
-        if col in row.index:
-            v = parse_number(row[col])
-            if v is not None:
-                return v
-    return 0
+def build_lookup(columns):
+    """Return a dict for case-insensitive, trimmed lookup and a normalized list."""
+    norm_map = {str(c).strip().lower(): c for c in columns}
+    return norm_map
+
+def get_value(row, norm_map, candidates):
+    for key in candidates:
+        if key in norm_map:
+            return row[norm_map[key]]
+    # fuzzy: first column containing the candidate token
+    cols_lower = {k: v for k, v in norm_map.items()}
+    for token in candidates:
+        for k in cols_lower:
+            if token in k:
+                return row[cols_lower[k]]
+    return ""
+
+def get_absent_days(row, norm_map):
+    v = get_value(row, norm_map, ABSENT_DAYS_CANDIDATES)
+    num = parse_number(v)
+    return num if num is not None else 0
 
 # -------------------------- PDF builder --------------------------
 def build_pdf_for_row(
@@ -177,9 +199,7 @@ def build_pdf_for_row(
     ]))
     elems += [hdr_tbl, Spacer(1,10)]
 
-    # ======= Two-column layout (landscape widths) =======
-    # Available inner width (approx): ~10.1" on A4 landscape with 0.8" side margins
-    # We'll give each side ~5.0"
+    # ======= Two-column layout (landscape) =======
     earnings_colwidths = [3.6*inch, 1.4*inch]
     deductions_colwidths = [3.6*inch, 1.4*inch]
 
@@ -217,7 +237,7 @@ def build_pdf_for_row(
         ("FONTNAME",(0,-1),(1,-1),"Helvetica-Bold"),
     ]))
 
-    # Two-column wrapper with a faint border
+    # Wrapper with faint border
     two_col = Table([[earn_tbl, ded_tbl]], colWidths=[5.0*inch, 5.0*inch])
     two_col.setStyle(TableStyle([
         ("VALIGN",(0,0),(-1,-1),"TOP"),
@@ -225,7 +245,7 @@ def build_pdf_for_row(
         ("RIGHTPADDING",(0,0),(-1,-1),0),
         ("TOPPADDING",(0,0),(-1,-1),0),
         ("BOTTOMPADDING",(0,0),(-1,-1),0),
-        ("GRID",(0,0),(-1,-1),0.3,colors.grey),  # faint border
+        ("GRID",(0,0),(-1,-1),0.3,colors.grey),
     ]))
     elems += [two_col, Spacer(1,12)]
 
@@ -246,13 +266,12 @@ def build_pdf_for_row(
     ]))
     elems += [sum_tbl]
 
-    # Net to pay (in words)
-    if include_words:
-        words = amount_in_words(std.get("Net Pay (optional)",0))
-        if words:
-            elems += [Spacer(1,10), Paragraph(f"<b>Net to pay (in words):</b> {words}", label_style)]
+    # Net in words (optional)
+    words = std.get("_net_words","")
+    if words:
+        elems += [Spacer(1,10), Paragraph(f"<b>Net to pay (in words):</b> {words}", label_style)]
 
-    # Signature row (lower by spacer)
+    # Signature row
     elems += [Spacer(1, FOOTER_SPACER_PT)]
     foot = Table([["Accounts","Employee Signature"]], colWidths=[4.0*inch,4.0*inch])
     foot.setStyle(TableStyle([
@@ -289,10 +308,13 @@ if not excel_file:
     st.info("Upload your payroll file to generate payslips.")
 else:
     try:
-        df = pd.read_excel(excel_file)  # reads first sheet
+        df = pd.read_excel(excel_file)  # first sheet
     except Exception as e:
         st.error(f"Failed to read Excel file: {e}")
         st.stop()
+
+    # Build a normalized header lookup once
+    norm_map = build_lookup(df.columns)
 
     st.success(f"Loaded {len(df)} rows.")
     if st.button("Generate PDFs"):
@@ -308,12 +330,18 @@ else:
                 row_series = df.iloc[i]
                 row_vals = values[i]
 
-                std = {}
-                std["Employee Code"] = clean(row_series.get(EMP_CODE_COL_NAME, ""))
-                std["Employee Name"] = clean(row_series.get(EMP_NAME_COL_NAME, ""))
-                std["Designation"]   = clean(row_series.get(DESIGNATION_COL_NAME, ""))
-                std["Pay Period"]    = ""  # map if you add a column
-                std["Absent Days"]   = extract_absent_days(row_series)
+                emp_name = clean(get_value(row_series, norm_map, EMP_NAME_CANDIDATES))
+                emp_code = clean(get_value(row_series, norm_map, EMP_CODE_CANDIDATES))
+                designation = clean(get_value(row_series, norm_map, DESIGNATION_CANDIDATES))
+                absent_days = get_absent_days(row_series, norm_map)
+
+                std = {
+                    "Employee Name": emp_name,
+                    "Employee Code": emp_code,
+                    "Designation": designation,
+                    "Pay Period": "",      # map another header if you have it
+                    "Absent Days": absent_days,
+                }
 
                 # Earnings
                 for lbl, L in EARNINGS_LETTERS.items():
@@ -323,7 +351,7 @@ else:
                 for lbl, Ls in DEDUCTIONS_LETTERS.items():
                     std[lbl] = sum_letters(row_vals, Ls)
 
-                # Totals (fallbacks)
+                # Totals
                 te   = parse_number(letter_value(row_vals, TOTAL_EARNINGS_LETTER))
                 td   = parse_number(letter_value(row_vals, TOTAL_DEDUCTIONS_LETTER))
                 npay = parse_number(letter_value(row_vals, NET_PAY_LETTER))
@@ -338,6 +366,7 @@ else:
                 std["Total Earnings (optional)"]   = te
                 std["Total Deductions (optional)"] = td
                 std["Net Pay (optional)"]          = npay
+                std["_net_words"] = amount_in_words(npay) if include_words else ""
 
                 try:
                     pdf_bytes = build_pdf_for_row(
@@ -345,10 +374,15 @@ else:
                         currency_label=currency_label, include_words=include_words,
                         logo_bytes=logo_bytes
                     )
-                    emp_code = safe_filename(std.get("Employee Code",""))
-                    emp_name = safe_filename(std.get("Employee Name",""))
-                    fname = f"{emp_code} - {emp_name}".strip() or f"Payslip_{i+1}"
-                    zf.writestr(f"{fname}.pdf", pdf_bytes)
+
+                    # Build filename from non-empty parts
+                    name_part = safe_filename(emp_name)
+                    code_part = safe_filename(emp_code)
+                    parts = [p for p in [code_part, name_part] if p]
+                    base = " - ".join(parts) if parts else f"Payslip_{i+1}"
+                    fname = base + ".pdf"
+
+                    zf.writestr(fname, pdf_bytes)
                 except Exception as e:
                     zf.writestr(f"row_{i+1}_ERROR.txt", f"Row {i+1}: {e}")
 

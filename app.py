@@ -28,14 +28,12 @@ TABLE_FONT_SIZE = 10
 HEADER_TITLE_SIZE = 18
 HEADER_COMPANY_SIZE = 13
 
-# ---- Fuzzy header candidates (case-insensitive) ----
 EMP_NAME_CANDIDATES = ["employee name", "name", "emp name", "staff name", "worker name"]
 EMP_CODE_CANDIDATES = ["employee code", "emp code", "emp id", "employee id", "code", "id", "staff id", "worker id"]
 DESIGNATION_CANDIDATES = ["designation", "title", "position", "proffession", "profession", "job title"]
 ABSENT_DAYS_CANDIDATES = ["leave/days", "leave days", "absent days", "absent", "leave"]
-PAY_PERIOD_CANDIDATES = ["pay period", "period", "month", "pay month"]  # fallback only
+PAY_PERIOD_CANDIDATES = ["pay period", "period", "month", "pay month"]
 
-# ---- Amount mapping by Excel LETTER (adjust if your file changes) ----
 EARNINGS_LETTERS = {
     "Basic Pay": "F",
     "Other Allowance": "G",
@@ -58,7 +56,7 @@ TOTAL_EARNINGS_LETTER   = "AG"
 TOTAL_DEDUCTIONS_LETTER = "AH"
 NET_PAY_LETTER          = "AL"
 
-# ========================== GENERIC HELPERS ==========================
+# ========================== HELPERS ==========================
 def clean(s):
     if s is None or (isinstance(s, float) and pd.isna(s)):
         return ""
@@ -77,11 +75,10 @@ def parse_number(x):
     try:
         return float(s)
     except:
-        # accept HH:MM[:SS] as hours
         if re.fullmatch(r"\d{1,2}:\d{2}(:\d{2})?", s):
-            parts = s.split(":")
-            h = int(parts[0]); m2 = int(parts[1]); sec = int(parts[2]) if len(parts)==3 else 0
-            return h + m2/60 + sec/3600
+            h, m2, *rest = s.split(":")
+            sec = int(rest[0]) if rest else 0
+            return int(h) + int(m2)/60 + sec/3600
         return None
 
 def fmt_amount(x, decimals=2):
@@ -121,7 +118,8 @@ def get_value(row, norm_map, candidates):
                 return row[orig]
     return ""
 
-# ========================== PAYSLIP HELPERS ==========================
+# ----- payroll column helpers -----
+from openpyxl.utils.cell import column_index_from_string
 def letter_value(row_values, letter, max_cols=None):
     try:
         idx = column_index_from_string(letter) - 1
@@ -147,33 +145,28 @@ def get_absent_days(row, norm_map):
     return num if num is not None else 0
 
 # ========================== PAYSLIP PDF ==========================
-def build_pdf_for_row(
-    std, company_name, title, page_size,
-    currency_label="AED", include_words=True, logo_bytes=None, logo_width=1.2*inch
-) -> bytes:
+def build_pdf_for_row(std, company_name, title, page_size,
+                      currency_label="AED", include_words=True, logo_bytes=None, logo_width=1.2*inch) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=page_size,
-        leftMargin=0.8*inch, rightMargin=0.8*inch,
-        topMargin=0.6*inch, bottomMargin=0.6*inch
+        leftMargin=0.8*inch, rightMargin=0.8*inch, topMargin=0.6*inch, bottomMargin=0.6*inch
     )
     doc.allowSplitting = 1
 
     styles = getSampleStyleSheet()
-    title_style   = ParagraphStyle("TitleBig",   parent=styles["Title"],   fontSize=HEADER_TITLE_SIZE, leading=20, alignment=1)
-    company_style = ParagraphStyle("Company",    parent=styles["Heading2"], fontSize=HEADER_COMPANY_SIZE, leading=16, alignment=1)
-    label_style   = ParagraphStyle("Label",      parent=styles["Normal"],   fontSize=TABLE_FONT_SIZE,   leading=TABLE_FONT_SIZE+2)
+    title_style   = ParagraphStyle("TitleBig", parent=styles["Title"],   fontSize=HEADER_TITLE_SIZE, leading=20, alignment=1)
+    company_style = ParagraphStyle("Company",  parent=styles["Heading2"], fontSize=HEADER_COMPANY_SIZE, leading=16, alignment=1)
+    label_style   = ParagraphStyle("Label",    parent=styles["Normal"],   fontSize=TABLE_FONT_SIZE,   leading=TABLE_FONT_SIZE+2)
 
     elems = []
-
     if logo_bytes:
         img = Image(io.BytesIO(logo_bytes)); img._restrictSize(logo_width, logo_width*1.2)
         head_tbl = Table([[img, Paragraph(f"<b>{title}</b><br/>{company_name}",
                              ParagraphStyle("hdr", parent=styles["Normal"], fontSize=HEADER_COMPANY_SIZE, leading=16, alignment=1))]],
                          colWidths=[logo_width, None])
         head_tbl.setStyle(TableStyle([
-            ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
-            ("ALIGN",(1,0),(1,0),"CENTER"),
+            ("VALIGN",(0,0),(-1,-1),"MIDDLE"), ("ALIGN",(1,0),(1,0),"CENTER"),
             ("LEFTPADDING",(0,0),(-1,-1),0), ("RIGHTPADDING",(0,0),(-1,-1),0),
             ("TOPPADDING",(0,0),(-1,-1),0),  ("BOTTOMPADDING",(0,0),(-1,-1),2),
         ]))
@@ -325,7 +318,7 @@ def build_std_for_row(row_series, row_vals, norm_map, max_cols, pay_period_text=
 if excel_file:
     try:
         xls = pd.ExcelFile(excel_file)
-        sheet_name = xls.sheet_names[0]  # first sheet used automatically
+        sheet_name = xls.sheet_names[0]
         df = pd.read_excel(xls, sheet_name=sheet_name, header=0)
         df.columns = [str(c).strip() for c in df.columns]
         st.success(f"Loaded {len(df)} rows from sheet '{sheet_name}'. Pay Period will be '{sheet_name}'.")
@@ -340,11 +333,9 @@ if excel_file:
 
         with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:
             values = df.values
-            total = len(df)
-            for i in range(total):
+            for i in range(len(df)):
                 row_series = df.iloc[i]
                 row_vals = values[i]
-
                 try:
                     norm_map = build_lookup(df.columns)
                     std = build_std_for_row(row_series, row_vals, norm_map, df.shape[1], pay_period_text=sheet_name)
@@ -362,15 +353,11 @@ if excel_file:
 
         zbuf.seek(0)
         run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
-        st.download_button(
-            "⬇️ Download Payslips (ZIP)",
-            data=zbuf.read(),
-            file_name=f"Payslips_{sheet_name}_{run_id}.zip",
-            mime="application/zip",
-        )
+        st.download_button("⬇️ Download Payslips (ZIP)", data=zbuf.read(),
+                           file_name=f"Payslips_{sheet_name}_{run_id}.zip", mime="application/zip")
 
 # ==========================================================
-#                OVERTIME REPORT (WIDE 1..31 FORMAT)
+#         OVERTIME REPORT (WIDE 1..31 FORMAT) — no summary grid shown
 # ==========================================================
 st.markdown("---")
 st.subheader("Overtime Report (Daily > 8 hours)")
@@ -378,7 +365,6 @@ st.subheader("Overtime Report (Daily > 8 hours)")
 att_file = st.file_uploader("Upload Attendance Excel (.xlsx)", type=["xlsx"], key="attendance")
 ot_threshold = st.number_input("Daily threshold (hours)", min_value=0.0, max_value=24.0, value=8.0, step=0.5)
 
-# ---------- helpers for wide attendance ----------
 def norm_cols_map(columns):
     return {str(c).strip().lower(): c for c in columns}
 
@@ -393,7 +379,6 @@ def pick_col(norm_map, *candidates):
     return None
 
 def parse_hours_cell(x):
-    """Return hours as float; accepts numbers, '8:30', '8h 30m', 'OFF', '-', blanks."""
     if pd.isna(x):
         return None
     if isinstance(x, (int, float)):
@@ -401,12 +386,10 @@ def parse_hours_cell(x):
     s = str(x).strip()
     if s == "" or s.lower() in {"off","a","absent","leave","holiday","-","--"}:
         return None
-    # HH:MM[:SS]
     if re.fullmatch(r"\d{1,2}:\d{2}(:\d{2})?", s):
         h, m, *rest = s.split(":")
         sec = int(rest[0]) if rest else 0
         return int(h) + int(m)/60 + sec/3600
-    # 8h 30m or 8 Hrs
     m = re.search(r"(\d+(\.\d+)?)\s*h", s, re.I)
     if m:
         hours = float(m.group(1))
@@ -420,22 +403,15 @@ def parse_hours_cell(x):
         return None
 
 def coerce_day_label(val):
-    """
-    Try to turn a header value into a day int 1..31.
-    Accepts '1', '01', '1.0', '1 ', '1-Sep', etc.
-    """
     if pd.isna(val):
         return None
     s = str(val).strip()
-    # numeric-like
     try:
-        f = float(s)
-        i = int(f)
+        f = float(s); i = int(f)
         if 1 <= i <= 31:
             return i
     except:
         pass
-    # leading digits
     m = re.match(r"^\s*(\d{1,2})\b", s)
     if m:
         i = int(m.group(1))
@@ -444,43 +420,26 @@ def coerce_day_label(val):
     return None
 
 def detect_day_columns_from_headers(df):
-    day_cols = []
-    for c in df.columns:
-        if coerce_day_label(c) is not None:
-            day_cols.append(c)
-    return day_cols
+    return [c for c in df.columns if coerce_day_label(c) is not None]
 
 def promote_day_header_if_needed(df, look_first_rows=6):
-    """
-    If day columns 1..31 are not in the column names, scan the first few rows
-    for a row that contains many day labels. If found, promote that row to header.
-    """
-    day_cols = detect_day_columns_from_headers(df)
-    if day_cols:
-        return df  # already ok
-
-    best_row = None
-    best_count = 0
+    if detect_day_columns_from_headers(df):
+        return df
+    best_row, best_count = None, 0
     for r in range(min(look_first_rows, len(df))):
-        row_vals = df.iloc[r].tolist()
-        count = sum(1 for v in row_vals if coerce_day_label(v) is not None)
+        count = sum(1 for v in df.iloc[r].tolist() if coerce_day_label(v) is not None)
         if count > best_count:
-            best_count = count
-            best_row = r
-
+            best_row, best_count = r, count
     if best_row is not None and best_count >= 5:
         header_vals = df.iloc[best_row].astype(str).tolist()
         new_df = df.iloc[best_row+1:].copy()
-        new_df.columns = header_vals
-        new_df.columns = [str(c).strip() for c in new_df.columns]
+        new_df.columns = [str(c).strip() for c in header_vals]
         return new_df
-
-    return df  # fallback
+    return df
 
 def build_ot_report_wide(df_att, month_label=""):
     df_att = promote_day_header_if_needed(df_att)
     df_att.columns = [str(c).strip() for c in df_att.columns]
-
     nm = norm_cols_map(df_att.columns)
     name_col = pick_col(nm, "employee name", "name", "emp name", "staff name") or "NAME"
     code_col = pick_col(nm, "employee code", "emp code", "code", "id") or "E CODE"
@@ -491,11 +450,9 @@ def build_ot_report_wide(df_att, month_label=""):
 
     id_vars = [c for c in [name_col, code_col] if c in df_att.columns]
     long = df_att.melt(id_vars=id_vars, value_vars=day_cols, var_name="DayLabel", value_name="HoursRaw")
-
     long["Day"] = long["DayLabel"].map(coerce_day_label)
     long.dropna(subset=["Day"], inplace=True)
     long["Day"] = long["Day"].astype(int)
-
     long["Hours"] = long["HoursRaw"].map(parse_hours_cell)
     long["OT_Hours"] = (long["Hours"] - ot_threshold).clip(lower=0)
     long["Has_OT"] = long["OT_Hours"] > 0
@@ -513,12 +470,7 @@ def build_ot_report_wide(df_att, month_label=""):
             )
             .reset_index()
     )
-
-    disp = summary.copy()
-    for c in ["Total_OT_Hours","Total_Work_Hours"]:
-        disp[c] = disp[c].map(lambda v: f"{v:.2f}")
-    disp = disp.sort_values("Total_OT_Hours", ascending=False)
-    return summary, disp, long, name_col, code_col
+    return summary, long, name_col, code_col
 
 def monthly_totals(summary_raw: pd.DataFrame, daily_long: pd.DataFrame, month_label: str):
     if summary_raw.empty:
@@ -527,14 +479,12 @@ def monthly_totals(summary_raw: pd.DataFrame, daily_long: pd.DataFrame, month_la
             "Total_OT_Hours": 0.0, "Total_Work_Hours": 0.0,
             "Days_Recorded": 0, "Avg_Work_Hours_per_Day": 0.0
         }])
-
     employees         = int(len(summary_raw))
     days_with_ot      = int(summary_raw["Days_With_OT"].sum())
     total_ot_hours    = float(summary_raw["Total_OT_Hours"].sum())
     total_work_hours  = float(summary_raw["Total_Work_Hours"].sum())
     days_recorded     = int(summary_raw["Days_Recorded"].sum())
     avg_work_per_day  = float(daily_long["Hours"].mean()) if not daily_long.empty else 0.0
-
     return pd.DataFrame([{
         "Month": month_label,
         "Employees": employees,
@@ -545,7 +495,6 @@ def monthly_totals(summary_raw: pd.DataFrame, daily_long: pd.DataFrame, month_la
         "Avg_Work_Hours_per_Day": round(avg_work_per_day, 2),
     }])
 
-# ---------- run the OT report ----------
 if att_file:
     try:
         xls2 = pd.ExcelFile(att_file)
@@ -553,22 +502,17 @@ if att_file:
         df_att = pd.read_excel(xls2, sheet_name=att_sheet, header=0)
         st.success(f"Attendance loaded from sheet '{att_sheet}' with {len(df_att)} rows.")
 
-        summary_raw, summary_disp, daily_long, name_col, code_col = build_ot_report_wide(df_att, month_label=att_sheet)
+        summary_raw, daily_long, name_col, code_col = build_ot_report_wide(df_att, month_label=att_sheet)
 
-        st.write("**Overtime Summary (per employee)**")
-        st.dataframe(summary_disp.rename(columns={
-            code_col: "Employee Code", name_col: "Employee Name"
-        }), use_container_width=True)
-
+        # HIDE per-employee grid — do not st.dataframe(summary)
+        # Show Monthly Totals only:
         month_totals_df = monthly_totals(summary_raw, daily_long, att_sheet)
         st.write("**Monthly Totals (all employees)**")
         st.dataframe(month_totals_df, use_container_width=True)
 
         # Downloads
         @st.cache_data
-        def to_csv_bytes(df):
-            return df.to_csv(index=False).encode("utf-8")
-
+        def to_csv_bytes(df): return df.to_csv(index=False).encode("utf-8")
         @st.cache_data
         def to_xlsx_bytes(df, sheet="Sheet1"):
             bio = io.BytesIO()
@@ -578,24 +522,15 @@ if att_file:
             return bio.read()
 
         c1, c2, c3 = st.columns(3)
-        c1.download_button(
-            "⬇️ Download OT Summary (CSV)",
-            data=to_csv_bytes(summary_raw),
-            file_name=f"OT_Summary_{att_sheet}.csv",
-            mime="text/csv",
-        )
-        c2.download_button(
-            "⬇️ Download Monthly Totals (CSV)",
-            data=to_csv_bytes(month_totals_df),
-            file_name=f"OT_Monthly_Totals_{att_sheet}.csv",
-            mime="text/csv",
-        )
-        c3.download_button(
-            "⬇️ Download Daily Long (CSV)",
-            data=to_csv_bytes(daily_long),
-            file_name=f"OT_Daily_{att_sheet}.csv",
-            mime="text/csv",
-        )
+        c1.download_button("⬇️ Download OT Summary (CSV)",
+                           data=to_csv_bytes(summary_raw),
+                           file_name=f"OT_Summary_{att_sheet}.csv", mime="text/csv")
+        c2.download_button("⬇️ Download Monthly Totals (CSV)",
+                           data=to_csv_bytes(month_totals_df),
+                           file_name=f"OT_Monthly_Totals_{att_sheet}.csv", mime="text/csv")
+        c3.download_button("⬇️ Download Daily Long (CSV)",
+                           data=to_csv_bytes(daily_long),
+                           file_name=f"OT_Daily_{att_sheet}.csv", mime="text/csv")
 
         with st.expander("Show daily long data (one row per employee-day)", expanded=False):
             st.dataframe(daily_long, use_container_width=True)

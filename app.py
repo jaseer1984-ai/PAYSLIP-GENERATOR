@@ -13,8 +13,9 @@ from reportlab.lib.pagesizes import A4, LETTER, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, KeepTogether
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
 )
+from reportlab.platypus.flowables import KeepInFrame, CondPageBreak
 from openpyxl.utils.cell import column_index_from_string
 
 # ========================== SETTINGS ==========================
@@ -23,11 +24,10 @@ DEFAULT_TITLE = "PAYSLIP"
 PAGE_SIZES = {"A4 (Landscape)": landscape(A4), "Letter (Landscape)": landscape(LETTER)}
 UI_POWERED_BY_TEXT = 'Powered By <b>Jaseer</b>'
 
-# Tighter layout so signature stays on first page
+# Compact layout so everything fits on one page
 TABLE_FONT_SIZE = 10
 HEADER_TITLE_SIZE = 18
 HEADER_COMPANY_SIZE = 13
-FOOTER_SPACER_PT = 36  # distance above signature line
 
 # ---- Fuzzy header candidates (case-insensitive) ----
 EMP_NAME_CANDIDATES = ["name", "employee name", "emp name", "staff name", "worker name"]
@@ -37,7 +37,6 @@ ABSENT_DAYS_CANDIDATES = ["leave/days", "leave days", "absent days", "absent", "
 PAY_PERIOD_CANDIDATES = ["pay period", "period", "month", "pay month"]
 
 # ---- Amount mapping by Excel LETTER ----
-# (Adjust these letters to match your sheet if needed.)
 EARNINGS_LETTERS = {
     "Basic Pay": "F",
     "Other Allowance": "G",
@@ -106,7 +105,6 @@ def safe_filename(s):
     return re.sub(r"\s+", " ", s) or ""
 
 def letter_value(row_values, letter, max_cols=None):
-    """Return cell value by Excel letter from the raw numpy row (values[i])."""
     try:
         idx = column_index_from_string(letter) - 1
         if max_cols is not None and idx >= max_cols:
@@ -126,15 +124,12 @@ def sum_letters(row_values, letters, max_cols=None):
     return total if used else 0.0
 
 def build_lookup(columns):
-    # normalized -> original column name
     return {str(c).strip().lower(): c for c in columns}
 
 def get_value(row, norm_map, candidates):
-    # exact
     for key in candidates:
         if key in norm_map:
             return row[norm_map[key]]
-    # fuzzy contains
     for token in candidates:
         for norm, orig in norm_map.items():
             if token in norm:
@@ -157,115 +152,90 @@ def build_pdf_for_row(
         leftMargin=0.8*inch, rightMargin=0.8*inch,
         topMargin=0.6*inch, bottomMargin=0.6*inch
     )
-    doc.allowSplitting = 0  # help keep blocks on a single page
+    # allow normal splitting; we no longer force big blocks together
+    doc.allowSplitting = 1
 
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle("TitleBig", parent=styles["Title"], fontSize=HEADER_TITLE_SIZE, leading=20, alignment=1)
-    company_style = ParagraphStyle("Company", parent=styles["Heading2"], fontSize=HEADER_COMPANY_SIZE, leading=16, alignment=1)
-    label_style = ParagraphStyle("Label", parent=styles["Normal"], fontSize=TABLE_FONT_SIZE, leading=TABLE_FONT_SIZE+2)
+    title_style   = ParagraphStyle("TitleBig",   parent=styles["Title"],   fontSize=HEADER_TITLE_SIZE, leading=20, alignment=1)
+    company_style = ParagraphStyle("Company",    parent=styles["Heading2"], fontSize=HEADER_COMPANY_SIZE, leading=16, alignment=1)
+    label_style   = ParagraphStyle("Label",      parent=styles["Normal"],   fontSize=TABLE_FONT_SIZE,   leading=TABLE_FONT_SIZE+2)
 
     elems = []
 
-    # Header with optional logo
+    # Header (logo optional)
     if logo_bytes:
-        img = Image(io.BytesIO(logo_bytes))
-        img._restrictSize(logo_width, logo_width*1.2)
-        head_tbl = Table(
-            [[img, Paragraph(f"<b>{title}</b><br/>{company_name}",
+        img = Image(io.BytesIO(logo_bytes)); img._restrictSize(logo_width, logo_width*1.2)
+        head_tbl = Table([[img, Paragraph(f"<b>{title}</b><br/>{company_name}",
                              ParagraphStyle("hdr", parent=styles["Normal"], fontSize=HEADER_COMPANY_SIZE, leading=16, alignment=1))]],
-            colWidths=[logo_width, None]
-        )
+                         colWidths=[logo_width, None])
         head_tbl.setStyle(TableStyle([
             ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
             ("ALIGN",(1,0),(1,0),"CENTER"),
-            ("LEFTPADDING",(0,0),(-1,-1),0),
-            ("RIGHTPADDING",(0,0),(-1,-1),0),
-            ("TOPPADDING",(0,0),(-1,-1),0),
-            ("BOTTOMPADDING",(0,0),(-1,-1),2),
+            ("LEFTPADDING",(0,0),(-1,-1),0), ("RIGHTPADDING",(0,0),(-1,-1),0),
+            ("TOPPADDING",(0,0),(-1,-1),0),  ("BOTTOMPADDING",(0,0),(-1,-1),2),
         ]))
         elems += [head_tbl, Spacer(1,6)]
     else:
         elems += [Paragraph(title, title_style), Paragraph(company_name, company_style), Spacer(1,6)]
 
-    # Employee header table (compact)
+    # Employee header (compact)
     hdr_rows = [
         ["Employee Name", clean(std.get("Employee Name",""))],
         ["Employee Code", clean(std.get("Employee Code",""))],
         ["Pay Period",    clean(std.get("Pay Period",""))],
         ["Designation",   clean(std.get("Designation",""))],
-        ["Absent Days",   fmt_amount(std.get("Absent Days",0), decimals=0)],
+        ["Absent Days",   fmt_amount(std.get("Absent Days",0), 0)],
     ]
     hdr_tbl = Table(hdr_rows, colWidths=[2.3*inch, None])
     hdr_tbl.setStyle(TableStyle([
-        ("FONTNAME",(0,0),(-1,-1),"Helvetica"),
-        ("FONTSIZE",(0,0),(-1,-1),TABLE_FONT_SIZE),
-        ("GRID",(0,0),(-1,-1),0.6,colors.black),
-        ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
-        ("LEFTPADDING",(0,0),(-1,-1),3),
-        ("RIGHTPADDING",(0,0),(-1,-1),3),
-        ("TOPPADDING",(0,0),(-1,-1),2),
-        ("BOTTOMPADDING",(0,0),(-1,-1),2),
-        ("FONTNAME",(0,0),(0,-1),"Helvetica-Bold"),
-        ("FONTNAME",(1,0),(1,-1),"Helvetica-Bold"),
+        ("FONTNAME",(0,0),(-1,-1),"Helvetica"), ("FONTSIZE",(0,0),(-1,-1),TABLE_FONT_SIZE),
+        ("GRID",(0,0),(-1,-1),0.6,colors.black), ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+        ("LEFTPADDING",(0,0),(-1,-1),3), ("RIGHTPADDING",(0,0),(-1,-1),3),
+        ("TOPPADDING",(0,0),(-1,-1),2), ("BOTTOMPADDING",(0,0),(-1,-1),2),
+        ("FONTNAME",(0,0),(0,-1),"Helvetica-Bold"), ("FONTNAME",(1,0),(1,-1),"Helvetica-Bold"),
     ]))
     elems += [hdr_tbl, Spacer(1,6)]
 
-    # Two-column tables (landscape widths)
-    earnings_colwidths = [3.6*inch, 1.4*inch]
-    deductions_colwidths = [3.6*inch, 1.4*inch]
-
-    earn_rows = [[f"Earnings ({currency_label})", "Amount"]]
-    for lbl in ["Basic Pay","Other Allowance","Housing Allowance","Over time",
-                "Reward for Full Day Attendance","Incentive"]:
+    # Earnings / Deductions tables
+    earn_rows = [[f"Earnings ({currency_label})","Amount"]]
+    for lbl in ["Basic Pay","Other Allowance","Housing Allowance","Over time","Reward for Full Day Attendance","Incentive"]:
         earn_rows.append([lbl, fmt_amount(std.get(lbl,0),2)])
     earn_rows.append(["Total Earnings", fmt_amount(std.get("Total Earnings (optional)",0),2)])
-    earn_tbl = Table(earn_rows, colWidths=earnings_colwidths, repeatRows=1, hAlign="LEFT")
+    earn_tbl = Table(earn_rows, colWidths=[3.6*inch,1.4*inch], repeatRows=1)
     earn_tbl.setStyle(TableStyle([
-        ("FONTNAME",(0,0),(-1,-1),"Helvetica"),
-        ("FONTSIZE",(0,0),(-1,-1),TABLE_FONT_SIZE),
-        ("BACKGROUND",(0,0),(1,0),colors.lightgrey),
-        ("GRID",(0,0),(-1,-1),0.6,colors.black),
+        ("FONTNAME",(0,0),(-1,-1),"Helvetica"), ("FONTSIZE",(0,0),(-1,-1),TABLE_FONT_SIZE),
+        ("BACKGROUND",(0,0),(1,0),colors.lightgrey), ("GRID",(0,0),(-1,-1),0.6,colors.black),
         ("ALIGN",(1,1),(1,-1),"RIGHT"),
-        ("LEFTPADDING",(0,0),(-1,-1),3),
-        ("RIGHTPADDING",(0,0),(-1,-1),3),
-        ("TOPPADDING",(0,0),(-1,-1),2),
-        ("BOTTOMPADDING",(0,0),(-1,-1),2),
-        ("FONTNAME",(0,0),(0,0),"Helvetica-Bold"),
-        ("FONTNAME",(0,-1),(1,-1),"Helvetica-Bold"),
+        ("LEFTPADDING",(0,0),(-1,-1),3), ("RIGHTPADDING",(0,0),(-1,-1),3),
+        ("TOPPADDING",(0,0),(-1,-1),2), ("BOTTOMPADDING",(0,0),(-1,-1),2),
+        ("FONTNAME",(0,0),(0,0),"Helvetica-Bold"), ("FONTNAME",(0,-1),(1,-1),"Helvetica-Bold"),
     ]))
 
-    ded_rows = [[f"Deductions ({currency_label})", "Amount"]]
+    ded_rows = [[f"Deductions ({currency_label})","Amount"]]
     for lbl in ["Absent Pay","Extra Leave Punishment Ded","Air Ticket Deduction","Other Fine Ded",
                 "Medical Deduction","Mob Bill Deduction","I LOE Insurance Deduction","Sal Advance Deduction"]:
         ded_rows.append([lbl, fmt_amount(std.get(lbl,0),2)])
     ded_rows.append(["Total Deductions", fmt_amount(std.get("Total Deductions (optional)",0),2)])
-    ded_tbl = Table(ded_rows, colWidths=deductions_colwidths, repeatRows=1, hAlign="LEFT")
+    ded_tbl = Table(ded_rows, colWidths=[3.6*inch,1.4*inch], repeatRows=1)
     ded_tbl.setStyle(TableStyle([
-        ("FONTNAME",(0,0),(-1,-1),"Helvetica"),
-        ("FONTSIZE",(0,0),(-1,-1),TABLE_FONT_SIZE),
-        ("BACKGROUND",(0,0),(1,0),colors.lightgrey),
-        ("GRID",(0,0),(-1,-1),0.6,colors.black),
+        ("FONTNAME",(0,0),(-1,-1),"Helvetica"), ("FONTSIZE",(0,0),(-1,-1),TABLE_FONT_SIZE),
+        ("BACKGROUND",(0,0),(1,0),colors.lightgrey), ("GRID",(0,0),(-1,-1),0.6,colors.black),
         ("ALIGN",(1,1),(1,-1),"RIGHT"),
-        ("LEFTPADDING",(0,0),(-1,-1),3),
-        ("RIGHTPADDING",(0,0),(-1,-1),3),
-        ("TOPPADDING",(0,0),(-1,-1),2),
-        ("BOTTOMPADDING",(0,0),(-1,-1),2),
-        ("FONTNAME",(0,0),(0,0),"Helvetica-Bold"),
-        ("FONTNAME",(0,-1),(1,-1),"Helvetica-Bold"),
+        ("LEFTPADDING",(0,0),(-1,-1),3), ("RIGHTPADDING",(0,0),(-1,-1),3),
+        ("TOPPADDING",(0,0),(-1,-1),2), ("BOTTOMPADDING",(0,0),(-1,-1),2),
+        ("FONTNAME",(0,0),(0,0),"Helvetica-Bold"), ("FONTNAME",(0,-1),(1,-1),"Helvetica-Bold"),
     ]))
 
     two_col = Table([[earn_tbl, ded_tbl]], colWidths=[5.0*inch, 5.0*inch])
     two_col.setStyle(TableStyle([
         ("VALIGN",(0,0),(-1,-1),"TOP"),
-        ("LEFTPADDING",(0,0),(-1,-1),0),
-        ("RIGHTPADDING",(0,0),(-1,-1),0),
-        ("TOPPADDING",(0,0),(-1,-1),0),
-        ("BOTTOMPADDING",(0,0),(-1,-1),0),
-        ("GRID",(0,0),(-1,-1),0.3,colors.grey),  # faint border
+        ("LEFTPADDING",(0,0),(-1,-1),0), ("RIGHTPADDING",(0,0),(-1,-1),0),
+        ("TOPPADDING",(0,0),(-1,-1),0),  ("BOTTOMPADDING",(0,0),(-1,-1),0),
+        ("GRID",(0,0),(-1,-1),0.3,colors.grey),
     ]))
-    elems += [two_col, Spacer(1,6)]
+    elems += [two_col, Spacer(1,5)]
 
-    # Summary + Signature kept together
+    # Summary (auto-shrink if space is tight)
     sum_rows = [
         ["Total Earnings",   fmt_amount(std.get("Total Earnings (optional)",0),2)],
         ["Total Deductions", fmt_amount(std.get("Total Deductions (optional)",0),2)],
@@ -273,31 +243,33 @@ def build_pdf_for_row(
     ]
     sum_tbl = Table(sum_rows, colWidths=[4.6*inch, 1.8*inch], hAlign="CENTER")
     sum_tbl.setStyle(TableStyle([
-        ("FONTNAME",(0,0),(-1,-1),"Helvetica"),
-        ("FONTSIZE",(0,0),(-1,-1),TABLE_FONT_SIZE),
-        ("GRID",(0,0),(-1,-1),0.6,colors.black),
-        ("ALIGN",(1,0),(1,-1),"RIGHT"),
-        ("LEFTPADDING",(0,0),(-1,-1),3),
-        ("RIGHTPADDING",(0,0),(-1,-1),3),
-        ("TOPPADDING",(0,0),(-1,-1),2),
-        ("BOTTOMPADDING",(0,0),(-1,-1),2),
+        ("FONTNAME",(0,0),(-1,-1),"Helvetica"), ("FONTSIZE",(0,0),(-1,-1),TABLE_FONT_SIZE),
+        ("GRID",(0,0),(-1,-1),0.6,colors.black), ("ALIGN",(1,0),(1,-1),"RIGHT"),
+        ("LEFTPADDING",(0,0),(-1,-1),3), ("RIGHTPADDING",(0,0),(-1,-1),3),
+        ("TOPPADDING",(0,0),(-1,-1),2), ("BOTTOMPADDING",(0,0),(-1,-1),2),
         ("FONTNAME",(0,2),(1,2),"Helvetica-Bold"),
         ("BACKGROUND",(0,2),(1,2),colors.whitesmoke),
     ]))
 
-    foot = Table([["Accounts", "Employee Signature"]], colWidths=[4.0*inch, 4.0*inch])
-    foot.setStyle(TableStyle([
-        ("FONTNAME",(0,0),(-1,-1),"Helvetica"),
-        ("FONTSIZE",(0,0),(-1,-1),TABLE_FONT_SIZE),
-        ("ALIGN",(0,0),(0,0),"LEFT"),
-        ("ALIGN",(1,0),(1,0),"RIGHT"),
-    ]))
+    summary_block = [sum_tbl]
+    words = amount_in_words(std.get("Net Pay (optional)",0))
+    if words:
+        summary_block += [Spacer(1,4), Paragraph(f"<b>Net to pay (in words):</b> {words}", label_style)]
 
-    block = [sum_tbl]
-    if std.get("_net_words"):
-        block += [Spacer(1, 6), Paragraph(f"<b>Net to pay (in words):</b> {std['_net_words']}", label_style)]
-    block += [Spacer(1, FOOTER_SPACER_PT), foot]
-    elems.append(KeepTogether(block))
+    # Keep the whole summary within a max height by shrinking if necessary
+    elems.append(KeepInFrame(maxWidth=None, maxHeight=1.8*inch, content=summary_block, mergeSpace=1, mode="shrink"))
+
+    # If almost no room left, move signature to next page (rare)
+    elems.append(CondPageBreak(0.6*inch))
+
+    # Signature
+    elems.append(Spacer(1, 18))  # ~0.25"
+    foot = Table([["Accounts","Employee Signature"]], colWidths=[4.0*inch, 4.0*inch])
+    foot.setStyle(TableStyle([
+        ("FONTNAME",(0,0),(-1,-1),"Helvetica"), ("FONTSIZE",(0,0),(-1,-1),TABLE_FONT_SIZE),
+        ("ALIGN",(0,0),(0,0),"LEFT"), ("ALIGN",(1,0),(1,0),"RIGHT"),
+    ]))
+    elems.append(foot)
 
     doc.build(elems)
     buf.seek(0)
@@ -317,7 +289,7 @@ with st.expander("Branding & Format", expanded=False):
     c1, c2, c3 = st.columns([1,1,1])
     currency_label = c1.text_input("Currency label", value="AED")
     include_words = c2.checkbox("Show amount in words", value=True)
-    logo_file = c3.file_uploader("Optional logo (PNG/JPG)", type=["png", "jpg", "jpeg"])
+    logo_file = c3.file_uploader("Optional logo (PNG/JPG)", type=["png","jpg","jpeg"])
 
 up = st.file_uploader("Upload Payroll Excel (.xlsx)", type=["xlsx"])
 
@@ -365,16 +337,14 @@ def build_std_for_row(row_series, row_vals, norm_map, max_cols, pay_period_text=
     std["Total Earnings (optional)"] = te
     std["Total Deductions (optional)"] = td
     std["Net Pay (optional)"] = npay
-    std["_net_words"] = amount_in_words(npay) if include_words else ""
     return std
 
 if df is not None:
     norm_map = build_lookup(df.columns)
     max_cols = df.shape[1]
-    page_size = PAGE_SIZES[[*PAGE_SIZES.keys()][0]]  # default in case user doesn't click
     logo_bytes = logo_file.read() if logo_file else None
 
-    # Preview first row button
+    # Preview first row
     if st.button("👀 Preview first row (single PDF)"):
         try:
             row_series = df.iloc[0]
@@ -412,7 +382,6 @@ if df is not None:
                         std, company_name, title, PAGE_SIZES[page_size_label],
                         currency_label=currency_label, include_words=include_words, logo_bytes=logo_bytes
                     )
-                    # Filename: CODE - NAME.pdf (skip empties)
                     parts = [safe_filename(std["Employee Code"]), safe_filename(std["Employee Name"])]
                     parts = [p for p in parts if p]
                     fname = (" - ".join(parts) if parts else f"Payslip_{i+1}") + ".pdf"

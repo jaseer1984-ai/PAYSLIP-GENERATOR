@@ -8,7 +8,7 @@ import streamlit as st
 from num2words import num2words
 
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4, LETTER
+from reportlab.lib.pagesizes import A4, LETTER, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
@@ -17,7 +17,7 @@ from openpyxl.utils.cell import column_index_from_string
 # -------------------------- Settings --------------------------
 DEFAULT_COMPANY = "AL Glazo Interiors and Décor LLC"
 DEFAULT_TITLE = "PAYSLIP"
-PAGE_SIZES = {"A4": A4, "Letter": LETTER}
+PAGE_SIZES = {"A4 (Landscape)": landscape(A4), "Letter (Landscape)": landscape(LETTER)}
 FOOTER_SPACER_PT = 80  # move Accounts/Employee Signature lower
 UI_POWERED_BY_TEXT = 'Powered By <b>Jaseer</b>'
 
@@ -63,7 +63,7 @@ def parse_number(x):
     if s in ["", "-", "–", "nan", "NaN", "None"]:
         return None
     s = s.replace(",", "")
-    m = re.fullmatch(r"\((\d+(\.\d+)?)\)", s)  # (100) -> -100
+    m = re.fullmatch(r"\((\d+(\.\d+)?)\)", s)
     if m:
         s = "-" + m.group(1)
     try:
@@ -130,7 +130,7 @@ def build_pdf_for_row(
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=page_size,
-        leftMargin=0.8*inch, rightMargin=0.8*inch,  # wider side margins
+        leftMargin=0.8*inch, rightMargin=0.8*inch,
         topMargin=0.6*inch, bottomMargin=0.6*inch
     )
 
@@ -141,7 +141,7 @@ def build_pdf_for_row(
 
     elems = []
 
-    # Header with optional logo (logo left, title+company centered)
+    # Header with optional logo
     if logo_bytes:
         img = Image(io.BytesIO(logo_bytes))
         img._restrictSize(logo_width, logo_width*1.2)
@@ -166,7 +166,7 @@ def build_pdf_for_row(
         ["Designation",   clean(std.get("Designation",""))],
         ["Absent Days",   fmt_amount(std.get("Absent Days",0), decimals=0)],
     ]
-    hdr_tbl = Table(hdr_rows, colWidths=[2.0*inch, None])
+    hdr_tbl = Table(hdr_rows, colWidths=[2.2*inch, None])
     hdr_tbl.setStyle(TableStyle([
         ("FONTNAME",(0,0),(-1,-1),"Helvetica"),
         ("FONTSIZE",(0,0),(-1,-1),11),
@@ -177,14 +177,19 @@ def build_pdf_for_row(
     ]))
     elems += [hdr_tbl, Spacer(1,10)]
 
-    # ======= Two-column layout: Earnings (left) & Deductions (right) =======
+    # ======= Two-column layout (landscape widths) =======
+    # Available inner width (approx): ~10.1" on A4 landscape with 0.8" side margins
+    # We'll give each side ~5.0"
+    earnings_colwidths = [3.6*inch, 1.4*inch]
+    deductions_colwidths = [3.6*inch, 1.4*inch]
+
     # Earnings table
     earn_rows = [[f"Earnings ({currency_label})", "Amount"]]
     for lbl in ["Basic Pay","Other Allowance","Housing Allowance","Over time",
                 "Reward for Full Day Attendance","Incentive"]:
         earn_rows.append([lbl, fmt_amount(std.get(lbl,0),2)])
     earn_rows.append(["Total Earnings", fmt_amount(std.get("Total Earnings (optional)",0),2)])
-    earn_tbl = Table(earn_rows, colWidths=[3.2*inch, 1.2*inch], repeatRows=1)
+    earn_tbl = Table(earn_rows, colWidths=earnings_colwidths, repeatRows=1)
     earn_tbl.setStyle(TableStyle([
         ("FONTNAME",(0,0),(-1,-1),"Helvetica"),
         ("FONTSIZE",(0,0),(-1,-1),11),
@@ -201,7 +206,7 @@ def build_pdf_for_row(
                 "Medical Deduction","Mob Bill Deduction","I LOE Insurance Deduction","Sal Advance Deduction"]:
         ded_rows.append([lbl, fmt_amount(std.get(lbl,0),2)])
     ded_rows.append(["Total Deductions", fmt_amount(std.get("Total Deductions (optional)",0),2)])
-    ded_tbl = Table(ded_rows, colWidths=[3.2*inch, 1.2*inch], repeatRows=1)
+    ded_tbl = Table(ded_rows, colWidths=deductions_colwidths, repeatRows=1)
     ded_tbl.setStyle(TableStyle([
         ("FONTNAME",(0,0),(-1,-1),"Helvetica"),
         ("FONTSIZE",(0,0),(-1,-1),11),
@@ -213,7 +218,7 @@ def build_pdf_for_row(
     ]))
 
     # Two-column wrapper with a faint border
-    two_col = Table([[earn_tbl, ded_tbl]], colWidths=[4.6*inch, 4.6*inch])
+    two_col = Table([[earn_tbl, ded_tbl]], colWidths=[5.0*inch, 5.0*inch])
     two_col.setStyle(TableStyle([
         ("VALIGN",(0,0),(-1,-1),"TOP"),
         ("LEFTPADDING",(0,0),(-1,-1),0),
@@ -230,7 +235,7 @@ def build_pdf_for_row(
         ["Total Deductions", fmt_amount(std.get("Total Deductions (optional)",0),2)],
         ["Net Pay",          fmt_amount(std.get("Net Pay (optional)",0),2)],
     ]
-    sum_tbl = Table(sum_rows, colWidths=[3.8*inch, 1.6*inch], hAlign="CENTER")
+    sum_tbl = Table(sum_rows, colWidths=[4.6*inch, 1.8*inch], hAlign="CENTER")
     sum_tbl.setStyle(TableStyle([
         ("FONTNAME",(0,0),(-1,-1),"Helvetica"),
         ("FONTSIZE",(0,0),(-1,-1),11),
@@ -249,7 +254,7 @@ def build_pdf_for_row(
 
     # Signature row (lower by spacer)
     elems += [Spacer(1, FOOTER_SPACER_PT)]
-    foot = Table([["Accounts","Employee Signature"]], colWidths=[3.5*inch,3.5*inch])
+    foot = Table([["Accounts","Employee Signature"]], colWidths=[4.0*inch,4.0*inch])
     foot.setStyle(TableStyle([
         ("FONTNAME",(0,0),(-1,-1),"Helvetica"),
         ("FONTSIZE",(0,0),(-1,-1),11),
@@ -263,8 +268,8 @@ def build_pdf_for_row(
     return buf.read()
 
 # -------------------------- Streamlit UI --------------------------
-st.set_page_config(page_title="PAYSLIP", page_icon="🧾", layout="centered")
-st.title("PAYSLIP")
+st.set_page_config(page_title="PAYSLIP (Landscape)", page_icon="🧾", layout="centered")
+st.title("PAYSLIP (Landscape)")
 
 with st.expander("Settings", expanded=True):
     colA, colB, colC = st.columns([2,1,1])
@@ -354,7 +359,7 @@ else:
         st.download_button(
             "⬇️ Download ZIP of PDFs",
             data=zbuf.read(),
-            file_name=f"Payslips_PDF_{run_id}.zip",
+            file_name=f"Payslips_Landscape_{run_id}.zip",
             mime="application/zip",
         )
 

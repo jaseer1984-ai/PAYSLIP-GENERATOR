@@ -2,7 +2,7 @@ import io
 import re
 import zipfile
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -24,7 +24,6 @@ DEFAULT_TITLE = "PAYSLIP"
 PAGE_SIZES = {"A4 (Landscape)": landscape(A4), "Letter (Landscape)": landscape(LETTER)}
 UI_POWERED_BY_TEXT = 'Powered By <b>Jaseer</b>'
 
-# Compact layout so everything fits on one page
 TABLE_FONT_SIZE = 10
 HEADER_TITLE_SIZE = 18
 HEADER_COMPANY_SIZE = 13
@@ -34,7 +33,7 @@ EMP_NAME_CANDIDATES = ["employee name", "name", "emp name", "staff name", "worke
 EMP_CODE_CANDIDATES = ["employee code", "emp code", "emp id", "employee id", "code", "id", "staff id", "worker id"]
 DESIGNATION_CANDIDATES = ["designation", "title", "position", "proffession", "profession", "job title"]
 ABSENT_DAYS_CANDIDATES = ["leave/days", "leave days", "absent days", "absent", "leave"]
-PAY_PERIOD_CANDIDATES = ["pay period", "period", "month", "pay month"]  # fallback; normally we use sheet name
+PAY_PERIOD_CANDIDATES = ["pay period", "period", "month", "pay month"]  # fallback only
 
 # ---- Amount mapping by Excel LETTER (adjust if your file changes) ----
 EARNINGS_LETTERS = {
@@ -52,14 +51,14 @@ DEDUCTIONS_LETTERS = {
     "Other Fine Ded": ["T"],
     "Medical Deduction": ["U"],
     "Mob Bill Deduction": ["V"],
-    "I LOE Insurance Deduction": ["W"],  # LOE caps, Insurance normal
+    "I LOE Insurance Deduction": ["W"],
     "Sal Advance Deduction": ["X"],
 }
 TOTAL_EARNINGS_LETTER   = "AG"
 TOTAL_DEDUCTIONS_LETTER = "AH"
 NET_PAY_LETTER          = "AL"
 
-# ========================== HELPERS ==========================
+# ========================== GENERIC HELPERS ==========================
 def clean(s):
     if s is None or (isinstance(s, float) and pd.isna(s)):
         return ""
@@ -72,12 +71,16 @@ def parse_number(x):
     if s in ["", "-", "–", "nan", "NaN", "None"]:
         return None
     s = s.replace(",", "")
-    m = re.fullmatch(r"\((\d+(\.\d+)?)\)", s)  # (100) -> -100
+    m = re.fullmatch(r"\((\d+(\.\d+)?)\)", s)
     if m:
         s = "-" + m.group(1)
     try:
         return float(s)
     except:
+        if re.fullmatch(r"\d{1,2}:\d{2}(:\d{2})?", s):
+            parts = s.split(":")
+            h = int(parts[0]); m = int(parts[1]); sec = int(parts[2]) if len(parts)==3 else 0
+            return h + m/60 + sec/3600
         return None
 
 def fmt_amount(x, decimals=2):
@@ -104,6 +107,20 @@ def safe_filename(s):
     s = re.sub(r"[\\/:*?\"<>|]+", " ", s).strip()
     return re.sub(r"\s+", " ", s) or ""
 
+def build_lookup(columns):
+    return {str(c).strip().lower(): c for c in columns}
+
+def get_value(row, norm_map, candidates):
+    for key in candidates:
+        if key in norm_map:
+            return row[norm_map[key]]
+    for token in candidates:
+        for norm, orig in norm_map.items():
+            if token in norm:
+                return row[orig]
+    return ""
+
+# ========================== PAYSLIP HELPERS ==========================
 def letter_value(row_values, letter, max_cols=None):
     try:
         idx = column_index_from_string(letter) - 1
@@ -123,25 +140,12 @@ def sum_letters(row_values, letters, max_cols=None):
             used = True
     return total if used else 0.0
 
-def build_lookup(columns):
-    return {str(c).strip().lower(): c for c in columns}
-
-def get_value(row, norm_map, candidates):
-    for key in candidates:
-        if key in norm_map:
-            return row[norm_map[key]]
-    for token in candidates:
-        for norm, orig in norm_map.items():
-            if token in norm:
-                return row[orig]
-    return ""
-
 def get_absent_days(row, norm_map):
     v = get_value(row, norm_map, ABSENT_DAYS_CANDIDATES)
     num = parse_number(v)
     return num if num is not None else 0
 
-# ========================== PDF BUILDER ==========================
+# ========================== PAYSLIP PDF ==========================
 def build_pdf_for_row(
     std, company_name, title, page_size,
     currency_label="AED", include_words=True, logo_bytes=None, logo_width=1.2*inch
@@ -161,7 +165,6 @@ def build_pdf_for_row(
 
     elems = []
 
-    # Header (logo optional)
     if logo_bytes:
         img = Image(io.BytesIO(logo_bytes)); img._restrictSize(logo_width, logo_width*1.2)
         head_tbl = Table([[img, Paragraph(f"<b>{title}</b><br/>{company_name}",
@@ -177,7 +180,6 @@ def build_pdf_for_row(
     else:
         elems += [Paragraph(title, title_style), Paragraph(company_name, company_style), Spacer(1,6)]
 
-    # Employee header (compact)
     hdr_rows = [
         ["Employee Name", clean(std.get("Employee Name",""))],
         ["Employee Code", clean(std.get("Employee Code",""))],
@@ -195,7 +197,6 @@ def build_pdf_for_row(
     ]))
     elems += [hdr_tbl, Spacer(1,6)]
 
-    # Earnings / Deductions tables
     earn_rows = [[f"Earnings ({currency_label})","Amount"]]
     for lbl in ["Basic Pay","Other Allowance","Housing Allowance","Over time","Reward for Full Day Attendance","Incentive"]:
         earn_rows.append([lbl, fmt_amount(std.get(lbl,0),2)])
@@ -234,7 +235,6 @@ def build_pdf_for_row(
     ]))
     elems += [two_col, Spacer(1,5)]
 
-    # Summary (auto-shrink if space is tight)
     sum_rows = [
         ["Total Earnings",   fmt_amount(std.get("Total Earnings (optional)",0),2)],
         ["Total Deductions", fmt_amount(std.get("Total Deductions (optional)",0),2)],
@@ -256,9 +256,8 @@ def build_pdf_for_row(
         summary_block += [Spacer(1,4), Paragraph(f"<b>Net to pay (in words):</b> {words}", label_style)]
 
     elems.append(KeepInFrame(maxWidth=None, maxHeight=1.8*inch, content=summary_block, mergeSpace=1, mode="shrink"))
-    elems.append(CondPageBreak(0.6*inch))  # move to next page only if no room
+    elems.append(CondPageBreak(0.6*inch))
 
-    # Signature
     elems.append(Spacer(1, 18))
     foot = Table([["Accounts","Employee Signature"]], colWidths=[4.0*inch, 4.0*inch])
     foot.setStyle(TableStyle([
@@ -271,15 +270,15 @@ def build_pdf_for_row(
     buf.seek(0)
     return buf.read()
 
-# ========================== STREAMLIT APP (minimal UI) ==========================
-st.set_page_config(page_title="PAYSLIP (Landscape)", page_icon="🧾", layout="centered")
-st.title("PAYSLIP (Landscape)")
+# ========================== STREAMLIT UI (PAYSLIP) ==========================
+st.set_page_config(page_title="PAYSLIP", page_icon="🧾", layout="centered")
+st.title("PAYSLIP")
 
 with st.expander("Settings", expanded=True):
     colA, colB = st.columns([2,1])
     company_name = colA.text_input("Company name", value=DEFAULT_COMPANY)
     page_size_label = colB.selectbox("Page size", list(PAGE_SIZES.keys()), index=0)
-title = st.text_input("PDF heading text", value=DEFAULT_TITLE, help="Shown at the top of the payslip")
+title = st.text_input("PDF heading text", value=DEFAULT_TITLE)
 
 with st.expander("Branding (optional)", expanded=False):
     c1, c2 = st.columns([1,1])
@@ -293,7 +292,6 @@ def build_std_for_row(row_series, row_vals, norm_map, max_cols, pay_period_text=
     emp_code = clean(get_value(row_series, norm_map, EMP_CODE_CANDIDATES))
     designation = clean(get_value(row_series, norm_map, DESIGNATION_CANDIDATES))
     absent_days = get_absent_days(row_series, norm_map)
-    # Pay Period comes from sheet name; if empty, try any column candidate
     pay_period = pay_period_text or clean(get_value(row_series, norm_map, PAY_PERIOD_CANDIDATES))
 
     std = {
@@ -326,17 +324,14 @@ def build_std_for_row(row_series, row_vals, norm_map, max_cols, pay_period_text=
 if excel_file:
     try:
         xls = pd.ExcelFile(excel_file)
-        sheet_name = xls.sheet_names[0]  # silently use first sheet
+        sheet_name = xls.sheet_names[0]  # first sheet used automatically
         df = pd.read_excel(xls, sheet_name=sheet_name, header=0)
         df.columns = [str(c).strip() for c in df.columns]
-
-        # No table preview; just a small success line
         st.success(f"Loaded {len(df)} rows from sheet '{sheet_name}'. Pay Period will be '{sheet_name}'.")
     except Exception as e:
         st.error(f"Failed to read Excel file: {e}")
         st.stop()
 
-    # Generate button only
     if st.button("Generate Payslips (ZIP)"):
         zbuf = io.BytesIO()
         logo_bytes = logo_file.read() if logo_file else None
@@ -372,6 +367,179 @@ if excel_file:
             file_name=f"Payslips_{sheet_name}_{run_id}.zip",
             mime="application/zip",
         )
+
+# ==========================================================
+#                OVERTIME REPORT (WIDE 1..31 FORMAT)
+# ==========================================================
+st.markdown("---")
+st.subheader("Overtime Report (Daily > 8 hours)")
+
+att_file = st.file_uploader("Upload Attendance Excel (.xlsx)", type=["xlsx"], key="attendance")
+ot_threshold = st.number_input("Daily threshold (hours)", min_value=0.0, max_value=24.0, value=8.0, step=0.5)
+
+def norm_cols_map(columns):
+    return {str(c).strip().lower(): c for c in columns}
+
+def pick_col(norm_map, *candidates):
+    for cand in candidates:
+        if cand in norm_map:
+            return norm_map[cand]
+    for cand in candidates:
+        for k, v in norm_map.items():
+            if cand in k:
+                return v
+    return None
+
+def parse_hours_cell(x):
+    if pd.isna(x):
+        return None
+    if isinstance(x, (int, float)):
+        return float(x)
+    s = str(x).strip()
+    if s == "" or s.lower() in {"off","a","absent","leave","holiday","-","--"}:
+        return None
+    if re.fullmatch(r"\d{1,2}:\d{2}(:\d{2})?", s):
+        parts = s.split(":")
+        h = int(parts[0]); m = int(parts[1]); sec = int(parts[2]) if len(parts)==3 else 0
+        return h + m/60 + sec/3600
+    m = re.search(r"(\d+(\.\d+)?)\s*h", s, re.I)
+    if m:
+        hours = float(m.group(1))
+        m2 = re.search(r"(\d+)\s*m", s, re.I)
+        if m2:
+            hours += int(m2.group(1))/60
+        return hours
+    try:
+        return float(s)
+    except:
+        return None
+
+def build_ot_report_wide(df_att, month_label=""):
+    nm = norm_cols_map(df_att.columns)
+    name_col = pick_col(nm, "employee name", "name", "emp name", "staff name") or "NAME"
+    code_col = pick_col(nm, "employee code", "emp code", "code", "id") or "E CODE"
+
+    day_cols = []
+    for c in df_att.columns:
+        cs = str(c).strip()
+        if re.fullmatch(r"(?:0?[1-9]|[12][0-9]|3[01])", cs):
+            day_cols.append(c)
+    if not day_cols:
+        raise ValueError("Could not find day columns 1..31 in the attendance sheet.")
+
+    long = df_att.melt(
+        id_vars=[col for col in [name_col, code_col] if col in df_att.columns],
+        value_vars=day_cols,
+        var_name="Day",
+        value_name="HoursRaw"
+    )
+    long["Hours"] = long["HoursRaw"].map(parse_hours_cell)
+    long["OT_Hours"] = (long["Hours"] - ot_threshold).clip(lower=0)
+    long["Has_OT"] = long["OT_Hours"] > 0
+    if month_label:
+        long["Month"] = month_label
+
+    group_cols = [code_col, name_col]
+    summary = (
+        long.groupby(group_cols, dropna=False)
+            .agg(
+                Days_With_OT=("Has_OT", lambda s: int(s.sum())),
+                Total_OT_Hours=("OT_Hours", "sum"),
+                Total_Work_Hours=("Hours", "sum"),
+                Days_Recorded=("Hours", lambda s: int(s.notna().sum())),
+            )
+            .reset_index()
+    )
+
+    disp = summary.copy()
+    for c in ["Total_OT_Hours","Total_Work_Hours"]:
+        disp[c] = disp[c].map(lambda v: f"{v:.2f}")
+    disp = disp.sort_values("Total_OT_Hours", ascending=False)
+    return summary, disp, long, name_col, code_col
+
+def monthly_totals(summary_raw: pd.DataFrame, daily_long: pd.DataFrame, month_label: str):
+    if summary_raw.empty:
+        return pd.DataFrame([{
+            "Month": month_label, "Employees": 0, "Days_With_OT": 0,
+            "Total_OT_Hours": 0.0, "Total_Work_Hours": 0.0,
+            "Days_Recorded": 0, "Avg_Work_Hours_per_Day": 0.0
+        }])
+
+    employees         = int(len(summary_raw))
+    days_with_ot      = int(summary_raw["Days_With_OT"].sum())
+    total_ot_hours    = float(summary_raw["Total_OT_Hours"].sum())
+    total_work_hours  = float(summary_raw["Total_Work_Hours"].sum())
+    days_recorded     = int(summary_raw["Days_Recorded"].sum())
+    avg_work_per_day  = float(daily_long["Hours"].mean()) if not daily_long.empty else 0.0
+
+    return pd.DataFrame([{
+        "Month": month_label,
+        "Employees": employees,
+        "Days_With_OT": days_with_ot,
+        "Total_OT_Hours": round(total_ot_hours, 2),
+        "Total_Work_Hours": round(total_work_hours, 2),
+        "Days_Recorded": days_recorded,
+        "Avg_Work_Hours_per_Day": round(avg_work_per_day, 2),
+    }])
+
+if att_file:
+    try:
+        xls2 = pd.ExcelFile(att_file)
+        att_sheet = xls2.sheet_names[0]
+        df_att = pd.read_excel(xls2, sheet_name=att_sheet, header=0)
+        df_att.columns = [str(c).strip() for c in df_att.columns]
+        st.success(f"Attendance loaded from sheet '{att_sheet}' with {len(df_att)} rows.")
+
+        summary_raw, summary_disp, daily_long, name_col, code_col = build_ot_report_wide(df_att, month_label=att_sheet)
+
+        st.write("**Overtime Summary (per employee)**")
+        st.dataframe(summary_disp.rename(columns={
+            code_col: "Employee Code", name_col: "Employee Name"
+        }), use_container_width=True)
+
+        month_totals_df = monthly_totals(summary_raw, daily_long, att_sheet)
+        st.write("**Monthly Totals (all employees)**")
+        st.dataframe(month_totals_df, use_container_width=True)
+
+        # Downloads
+        @st.cache_data
+        def to_csv_bytes(df):
+            return df.to_csv(index=False).encode("utf-8")
+
+        @st.cache_data
+        def to_xlsx_bytes(df, sheet="Sheet1"):
+            bio = io.BytesIO()
+            with pd.ExcelWriter(bio, engine="xlsxwriter") as writer:
+                df.to_excel(writer, index=False, sheet_name=sheet)
+            bio.seek(0)
+            return bio.read()
+
+        c1, c2, c3 = st.columns(3)
+        c1.download_button(
+            "⬇️ Download OT Summary (CSV)",
+            data=to_csv_bytes(summary_raw),
+            file_name=f"OT_Summary_{att_sheet}.csv",
+            mime="text/csv",
+        )
+        c2.download_button(
+            "⬇️ Download Monthly Totals (CSV)",
+            data=to_csv_bytes(month_totals_df),
+            file_name=f"OT_Monthly_Totals_{att_sheet}.csv",
+            mime="text/csv",
+        )
+        c3.download_button(
+            "⬇️ Download Daily Long (CSV)",
+            data=to_csv_bytes(daily_long),
+            file_name=f"OT_Daily_{att_sheet}.csv",
+            mime="text/csv",
+        )
+
+        with st.expander("Show daily long data (one row per employee-day)", expanded=False):
+            st.dataframe(daily_long, use_container_width=True)
+
+    except Exception as e:
+        st.error(f"Failed to build OT report: {e}")
+        st.code(traceback.format_exc(), language="python")
 
 # --- UI footer: Powered By Jaseer (NOT in PDFs) ---
 st.markdown(

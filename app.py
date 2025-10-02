@@ -30,13 +30,13 @@ HEADER_TITLE_SIZE = 18
 HEADER_COMPANY_SIZE = 13
 
 # ---- Fuzzy header candidates (case-insensitive) ----
-EMP_NAME_CANDIDATES = ["name", "employee name", "emp name", "staff name", "worker name"]
-EMP_CODE_CANDIDATES = ["code", "employee code", "emp code", "emp id", "employee id", "id", "staff id", "worker id"]
+EMP_NAME_CANDIDATES = ["employee name", "name", "emp name", "staff name", "worker name"]
+EMP_CODE_CANDIDATES = ["employee code", "emp code", "emp id", "employee id", "code", "id", "staff id", "worker id"]
 DESIGNATION_CANDIDATES = ["designation", "title", "position", "proffession", "profession", "job title"]
 ABSENT_DAYS_CANDIDATES = ["leave/days", "leave days", "absent days", "absent", "leave"]
-PAY_PERIOD_CANDIDATES = ["pay period", "period", "month", "pay month"]
+PAY_PERIOD_CANDIDATES = ["pay period", "period", "month", "pay month"]  # fallback; normally we use sheet name
 
-# ---- Amount mapping by Excel LETTER ----
+# ---- Amount mapping by Excel LETTER (adjust if your file changes) ----
 EARNINGS_LETTERS = {
     "Basic Pay": "F",
     "Other Allowance": "G",
@@ -152,7 +152,6 @@ def build_pdf_for_row(
         leftMargin=0.8*inch, rightMargin=0.8*inch,
         topMargin=0.6*inch, bottomMargin=0.6*inch
     )
-    # allow normal splitting; we no longer force big blocks together
     doc.allowSplitting = 1
 
     styles = getSampleStyleSheet()
@@ -256,14 +255,11 @@ def build_pdf_for_row(
     if words:
         summary_block += [Spacer(1,4), Paragraph(f"<b>Net to pay (in words):</b> {words}", label_style)]
 
-    # Keep the whole summary within a max height by shrinking if necessary
     elems.append(KeepInFrame(maxWidth=None, maxHeight=1.8*inch, content=summary_block, mergeSpace=1, mode="shrink"))
-
-    # If almost no room left, move signature to next page (rare)
-    elems.append(CondPageBreak(0.6*inch))
+    elems.append(CondPageBreak(0.6*inch))  # move to next page only if no room
 
     # Signature
-    elems.append(Spacer(1, 18))  # ~0.25"
+    elems.append(Spacer(1, 18))
     foot = Table([["Accounts","Employee Signature"]], colWidths=[4.0*inch, 4.0*inch])
     foot.setStyle(TableStyle([
         ("FONTNAME",(0,0),(-1,-1),"Helvetica"), ("FONTSIZE",(0,0),(-1,-1),TABLE_FONT_SIZE),
@@ -275,42 +271,30 @@ def build_pdf_for_row(
     buf.seek(0)
     return buf.read()
 
-# ========================== STREAMLIT APP ==========================
+# ========================== STREAMLIT APP (minimal UI) ==========================
 st.set_page_config(page_title="PAYSLIP (Landscape)", page_icon="🧾", layout="centered")
 st.title("PAYSLIP (Landscape)")
 
 with st.expander("Settings", expanded=True):
-    colA, colB, colC = st.columns([2,1,1])
+    colA, colB = st.columns([2,1])
     company_name = colA.text_input("Company name", value=DEFAULT_COMPANY)
     page_size_label = colB.selectbox("Page size", list(PAGE_SIZES.keys()), index=0)
-    title = colC.text_input("PDF heading text", value=DEFAULT_TITLE)
+title = st.text_input("PDF heading text", value=DEFAULT_TITLE, help="Shown at the top of the payslip")
 
-with st.expander("Branding & Format", expanded=False):
-    c1, c2, c3 = st.columns([1,1,1])
+with st.expander("Branding (optional)", expanded=False):
+    c1, c2 = st.columns([1,1])
     currency_label = c1.text_input("Currency label", value="AED")
-    include_words = c2.checkbox("Show amount in words", value=True)
-    logo_file = c3.file_uploader("Optional logo (PNG/JPG)", type=["png","jpg","jpeg"])
+    logo_file = c2.file_uploader("Logo (PNG/JPG)", type=["png","jpg","jpeg"])
 
-up = st.file_uploader("Upload Payroll Excel (.xlsx)", type=["xlsx"])
-
-df = None
-if up:
-    try:
-        xls = pd.ExcelFile(up)
-        sheet = st.selectbox("Choose sheet", xls.sheet_names, index=0)
-        header_row = st.number_input("Header row (1-based)", 1, 50, value=1)
-        df = pd.read_excel(xls, sheet_name=sheet, header=header_row - 1)
-        st.success(f"Loaded {len(df)} rows from sheet '{sheet}'.")
-        st.dataframe(df.head(3))
-    except Exception as e:
-        st.error(f"Failed to read Excel file: {e}")
+excel_file = st.file_uploader("Upload Payroll Excel (.xlsx)", type=["xlsx"])
 
 def build_std_for_row(row_series, row_vals, norm_map, max_cols, pay_period_text=""):
     emp_name = clean(get_value(row_series, norm_map, EMP_NAME_CANDIDATES))
     emp_code = clean(get_value(row_series, norm_map, EMP_CODE_CANDIDATES))
     designation = clean(get_value(row_series, norm_map, DESIGNATION_CANDIDATES))
     absent_days = get_absent_days(row_series, norm_map)
-    pay_period = clean(get_value(row_series, norm_map, PAY_PERIOD_CANDIDATES)) or pay_period_text
+    # Pay Period comes from sheet name; if empty, try any column candidate
+    pay_period = pay_period_text or clean(get_value(row_series, norm_map, PAY_PERIOD_CANDIDATES))
 
     std = {
         "Employee Name": emp_name,
@@ -339,36 +323,24 @@ def build_std_for_row(row_series, row_vals, norm_map, max_cols, pay_period_text=
     std["Net Pay (optional)"] = npay
     return std
 
-if df is not None:
-    norm_map = build_lookup(df.columns)
-    max_cols = df.shape[1]
-    logo_bytes = logo_file.read() if logo_file else None
+if excel_file:
+    try:
+        xls = pd.ExcelFile(excel_file)
+        sheet_name = xls.sheet_names[0]  # silently use first sheet
+        df = pd.read_excel(xls, sheet_name=sheet_name, header=0)
+        df.columns = [str(c).strip() for c in df.columns]
 
-    # Preview first row
-    if st.button("👀 Preview first row (single PDF)"):
-        try:
-            row_series = df.iloc[0]
-            row_vals = df.values[0]
-            std = build_std_for_row(row_series, row_vals, norm_map, max_cols)
-            pdf_bytes = build_pdf_for_row(
-                std, company_name, title, PAGE_SIZES[page_size_label],
-                currency_label=currency_label, include_words=include_words, logo_bytes=logo_bytes
-            )
-            st.download_button(
-                "⬇️ Download Preview (Row 1)",
-                data=pdf_bytes,
-                file_name=f"{safe_filename(std['Employee Code'])} - {safe_filename(std['Employee Name']) or 'Preview'}.pdf",
-                mime="application/pdf",
-            )
-        except Exception as e:
-            tb = traceback.format_exc()
-            st.error(f"Preview failed: {e}")
-            st.code(tb, language="python")
+        # No table preview; just a small success line
+        st.success(f"Loaded {len(df)} rows from sheet '{sheet_name}'. Pay Period will be '{sheet_name}'.")
+    except Exception as e:
+        st.error(f"Failed to read Excel file: {e}")
+        st.stop()
 
-    # Batch generate
-    if st.button("🚀 Generate PDFs for all rows"):
+    # Generate button only
+    if st.button("Generate Payslips (ZIP)"):
         zbuf = io.BytesIO()
-        prog = st.progress(0.0)
+        logo_bytes = logo_file.read() if logo_file else None
+        page_size = PAGE_SIZES[page_size_label]
 
         with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:
             values = df.values
@@ -376,11 +348,13 @@ if df is not None:
             for i in range(total):
                 row_series = df.iloc[i]
                 row_vals = values[i]
+
                 try:
-                    std = build_std_for_row(row_series, row_vals, norm_map, max_cols)
+                    norm_map = build_lookup(df.columns)
+                    std = build_std_for_row(row_series, row_vals, norm_map, df.shape[1], pay_period_text=sheet_name)
                     pdf_bytes = build_pdf_for_row(
-                        std, company_name, title, PAGE_SIZES[page_size_label],
-                        currency_label=currency_label, include_words=include_words, logo_bytes=logo_bytes
+                        std, company_name, title, page_size,
+                        currency_label=currency_label, include_words=True, logo_bytes=logo_bytes
                     )
                     parts = [safe_filename(std["Employee Code"]), safe_filename(std["Employee Name"])]
                     parts = [p for p in parts if p]
@@ -388,18 +362,14 @@ if df is not None:
                     zf.writestr(fname, pdf_bytes)
                 except Exception as e:
                     tb = traceback.format_exc()
-                    st.error(f"Row {i+1}: {e}")
-                    st.code(tb, language="python")
                     zf.writestr(f"row_{i+1}_ERROR.txt", f"Row {i+1}: {e}\n\n{tb}")
-
-                prog.progress((i + 1) / max(1, total))
 
         zbuf.seek(0)
         run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
         st.download_button(
-            "⬇️ Download ZIP of PDFs",
+            "⬇️ Download Payslips (ZIP)",
             data=zbuf.read(),
-            file_name=f"Payslips_Landscape_{run_id}.zip",
+            file_name=f"Payslips_{sheet_name}_{run_id}.zip",
             mime="application/zip",
         )
 

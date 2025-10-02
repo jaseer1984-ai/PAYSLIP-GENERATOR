@@ -1,6 +1,7 @@
 import io
 import re
 import zipfile
+import traceback
 from datetime import datetime
 
 import pandas as pd
@@ -33,8 +34,10 @@ EMP_NAME_CANDIDATES = ["name", "employee name", "emp name", "staff name", "worke
 EMP_CODE_CANDIDATES = ["code", "employee code", "emp code", "emp id", "employee id", "id", "staff id", "worker id"]
 DESIGNATION_CANDIDATES = ["designation", "title", "position", "proffession", "profession", "job title"]
 ABSENT_DAYS_CANDIDATES = ["leave/days", "leave days", "absent days", "absent", "leave"]
+PAY_PERIOD_CANDIDATES = ["pay period", "period", "month", "pay month"]
 
 # ---- Amount mapping by Excel LETTER ----
+# (Adjust these letters to match your sheet if needed.)
 EARNINGS_LETTERS = {
     "Basic Pay": "F",
     "Other Allowance": "G",
@@ -102,21 +105,21 @@ def safe_filename(s):
     s = re.sub(r"[\\/:*?\"<>|]+", " ", s).strip()
     return re.sub(r"\s+", " ", s) or ""
 
-def letter_value(row_values, letter):
+def letter_value(row_values, letter, max_cols=None):
     """Return cell value by Excel letter from the raw numpy row (values[i])."""
     try:
         idx = column_index_from_string(letter) - 1
-        if 0 <= idx < len(row_values):
-            return row_values[idx]
+        if max_cols is not None and idx >= max_cols:
+            return None
+        return row_values[idx]
     except Exception:
-        pass
-    return None
+        return None
 
-def sum_letters(row_values, letters):
+def sum_letters(row_values, letters, max_cols=None):
     total = 0.0
     used = False
     for L in letters:
-        v = parse_number(letter_value(row_values, L))
+        v = parse_number(letter_value(row_values, L, max_cols))
         if v is not None:
             total += v
             used = True
@@ -291,10 +294,8 @@ def build_pdf_for_row(
     ]))
 
     block = [sum_tbl]
-    if include_words:
-        words = amount_in_words(std.get("Net Pay (optional)", 0))
-        if words:
-            block += [Spacer(1, 6), Paragraph(f"<b>Net to pay (in words):</b> {words}", label_style)]
+    if std.get("_net_words"):
+        block += [Spacer(1, 6), Paragraph(f"<b>Net to pay (in words):</b> {std['_net_words']}", label_style)]
     block += [Spacer(1, FOOTER_SPACER_PT), foot]
     elems.append(KeepTogether(block))
 
@@ -318,25 +319,86 @@ with st.expander("Branding & Format", expanded=False):
     include_words = c2.checkbox("Show amount in words", value=True)
     logo_file = c3.file_uploader("Optional logo (PNG/JPG)", type=["png", "jpg", "jpeg"])
 
-excel_file = st.file_uploader("Upload Payroll Excel (.xlsx)", type=["xlsx"])
+up = st.file_uploader("Upload Payroll Excel (.xlsx)", type=["xlsx"])
 
-if not excel_file:
-    st.info("Upload your payroll file to generate payslips.")
-else:
+df = None
+if up:
     try:
-        df = pd.read_excel(excel_file)
+        xls = pd.ExcelFile(up)
+        sheet = st.selectbox("Choose sheet", xls.sheet_names, index=0)
+        header_row = st.number_input("Header row (1-based)", 1, 50, value=1)
+        df = pd.read_excel(xls, sheet_name=sheet, header=header_row - 1)
+        st.success(f"Loaded {len(df)} rows from sheet '{sheet}'.")
+        st.dataframe(df.head(3))
     except Exception as e:
         st.error(f"Failed to read Excel file: {e}")
-        st.stop()
 
+def build_std_for_row(row_series, row_vals, norm_map, max_cols, pay_period_text=""):
+    emp_name = clean(get_value(row_series, norm_map, EMP_NAME_CANDIDATES))
+    emp_code = clean(get_value(row_series, norm_map, EMP_CODE_CANDIDATES))
+    designation = clean(get_value(row_series, norm_map, DESIGNATION_CANDIDATES))
+    absent_days = get_absent_days(row_series, norm_map)
+    pay_period = clean(get_value(row_series, norm_map, PAY_PERIOD_CANDIDATES)) or pay_period_text
+
+    std = {
+        "Employee Name": emp_name,
+        "Employee Code": emp_code,
+        "Designation": designation,
+        "Pay Period": pay_period,
+        "Absent Days": absent_days,
+    }
+    for lbl, L in EARNINGS_LETTERS.items():
+        std[lbl] = parse_number(letter_value(row_vals, L, max_cols)) or 0.0
+    for lbl, Ls in DEDUCTIONS_LETTERS.items():
+        std[lbl] = sum_letters(row_vals, Ls, max_cols)
+
+    te = parse_number(letter_value(row_vals, TOTAL_EARNINGS_LETTER, max_cols))
+    td = parse_number(letter_value(row_vals, TOTAL_DEDUCTIONS_LETTER, max_cols))
+    npay = parse_number(letter_value(row_vals, NET_PAY_LETTER, max_cols))
+    if te is None:
+        te = sum(std.get(k, 0.0) for k in EARNINGS_LETTERS.keys())
+    if td is None:
+        td = sum(std.get(k, 0.0) for k in DEDUCTIONS_LETTERS.keys())
+    if npay is None:
+        npay = te - td
+
+    std["Total Earnings (optional)"] = te
+    std["Total Deductions (optional)"] = td
+    std["Net Pay (optional)"] = npay
+    std["_net_words"] = amount_in_words(npay) if include_words else ""
+    return std
+
+if df is not None:
     norm_map = build_lookup(df.columns)
-    st.success(f"Loaded {len(df)} rows.")
+    max_cols = df.shape[1]
+    page_size = PAGE_SIZES[[*PAGE_SIZES.keys()][0]]  # default in case user doesn't click
+    logo_bytes = logo_file.read() if logo_file else None
 
-    if st.button("Generate PDFs"):
+    # Preview first row button
+    if st.button("👀 Preview first row (single PDF)"):
+        try:
+            row_series = df.iloc[0]
+            row_vals = df.values[0]
+            std = build_std_for_row(row_series, row_vals, norm_map, max_cols)
+            pdf_bytes = build_pdf_for_row(
+                std, company_name, title, PAGE_SIZES[page_size_label],
+                currency_label=currency_label, include_words=include_words, logo_bytes=logo_bytes
+            )
+            st.download_button(
+                "⬇️ Download Preview (Row 1)",
+                data=pdf_bytes,
+                file_name=f"{safe_filename(std['Employee Code'])} - {safe_filename(std['Employee Name']) or 'Preview'}.pdf",
+                mime="application/pdf",
+            )
+        except Exception as e:
+            tb = traceback.format_exc()
+            st.error(f"Preview failed: {e}")
+            st.code(tb, language="python")
+
+    # Batch generate
+    if st.button("🚀 Generate PDFs for all rows"):
         zbuf = io.BytesIO()
-        page_size = PAGE_SIZES[page_size_label]
         prog = st.progress(0.0)
-        logo_bytes = logo_file.read() if logo_file else None
 
         with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:
             values = df.values
@@ -344,54 +406,22 @@ else:
             for i in range(total):
                 row_series = df.iloc[i]
                 row_vals = values[i]
-
-                # Fuzzy text fields
-                emp_name = clean(get_value(row_series, norm_map, EMP_NAME_CANDIDATES))
-                emp_code = clean(get_value(row_series, norm_map, EMP_CODE_CANDIDATES))
-                designation = clean(get_value(row_series, norm_map, DESIGNATION_CANDIDATES))
-                absent_days = get_absent_days(row_series, norm_map)
-
-                std = {
-                    "Employee Name": emp_name,
-                    "Employee Code": emp_code,
-                    "Designation": designation,
-                    "Pay Period": "",  # map if you add a column for it
-                    "Absent Days": absent_days,
-                }
-
-                # Earnings and Deductions by letters
-                for lbl, L in EARNINGS_LETTERS.items():
-                    std[lbl] = parse_number(letter_value(row_vals, L)) or 0.0
-                for lbl, Ls in DEDUCTIONS_LETTERS.items():
-                    std[lbl] = sum_letters(row_vals, Ls)
-
-                # Totals (fallback to sums if missing)
-                te = parse_number(letter_value(row_vals, TOTAL_EARNINGS_LETTER))
-                td = parse_number(letter_value(row_vals, TOTAL_DEDUCTIONS_LETTER))
-                npay = parse_number(letter_value(row_vals, NET_PAY_LETTER))
-                if te is None:
-                    te = sum(std.get(k, 0.0) for k in EARNINGS_LETTERS.keys())
-                if td is None:
-                    td = sum(std.get(k, 0.0) for k in DEDUCTIONS_LETTERS.keys())
-                if npay is None:
-                    npay = te - td
-                std["Total Earnings (optional)"] = te
-                std["Total Deductions (optional)"] = td
-                std["Net Pay (optional)"] = npay
-
                 try:
+                    std = build_std_for_row(row_series, row_vals, norm_map, max_cols)
                     pdf_bytes = build_pdf_for_row(
-                        std, company_name, title, page_size,
-                        currency_label=currency_label, include_words=include_words,
-                        logo_bytes=logo_bytes
+                        std, company_name, title, PAGE_SIZES[page_size_label],
+                        currency_label=currency_label, include_words=include_words, logo_bytes=logo_bytes
                     )
                     # Filename: CODE - NAME.pdf (skip empties)
-                    parts = [safe_filename(emp_code), safe_filename(emp_name)]
+                    parts = [safe_filename(std["Employee Code"]), safe_filename(std["Employee Name"])]
                     parts = [p for p in parts if p]
                     fname = (" - ".join(parts) if parts else f"Payslip_{i+1}") + ".pdf"
                     zf.writestr(fname, pdf_bytes)
                 except Exception as e:
-                    zf.writestr(f"row_{i+1}_ERROR.txt", f"Row {i+1}: {e}")
+                    tb = traceback.format_exc()
+                    st.error(f"Row {i+1}: {e}")
+                    st.code(tb, language="python")
+                    zf.writestr(f"row_{i+1}_ERROR.txt", f"Row {i+1}: {e}\n\n{tb}")
 
                 prog.progress((i + 1) / max(1, total))
 

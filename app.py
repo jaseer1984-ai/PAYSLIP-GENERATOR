@@ -56,7 +56,7 @@ TOTAL_EARNINGS_LETTER   = "AG"
 TOTAL_DEDUCTIONS_LETTER = "AH"
 NET_PAY_LETTER          = "AL"
 
-# ========================== HELPERS ==========================
+# ========================== GENERIC HELPERS ==========================
 def clean(s):
     if s is None or (isinstance(s, float) and pd.isna(s)):
         return ""
@@ -75,6 +75,7 @@ def parse_number(x):
     try:
         return float(s)
     except:
+        # accept HH:MM[:SS] as hours
         if re.fullmatch(r"\d{1,2}:\d{2}(:\d{2})?", s):
             h, m2, *rest = s.split(":")
             sec = int(rest[0]) if rest else 0
@@ -119,7 +120,6 @@ def get_value(row, norm_map, candidates):
     return ""
 
 # ----- payroll column helpers -----
-from openpyxl.utils.cell import column_index_from_string
 def letter_value(row_values, letter, max_cols=None):
     try:
         idx = column_index_from_string(letter) - 1
@@ -357,7 +357,7 @@ if excel_file:
                            file_name=f"Payslips_{sheet_name}_{run_id}.zip", mime="application/zip")
 
 # ==========================================================
-#         OVERTIME REPORT (WIDE 1..31 FORMAT) — no summary grid shown
+#       OVERTIME REPORT (WIDE 1..31 FORMAT) + ABSENT COUNT
 # ==========================================================
 st.markdown("---")
 st.subheader("Overtime Report (Daily > 8 hours)")
@@ -378,18 +378,28 @@ def pick_col(norm_map, *candidates):
                 return v
     return None
 
+# ---- parse helpers for attendance ----
+ABSENT_TOKENS = {"a", "absent"}  # extend if needed
+
+def is_absent_cell(x):
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return False
+    s = str(x).strip().lower()
+    return s in ABSENT_TOKENS
+
 def parse_hours_cell(x):
-    if pd.isna(x):
+    """Return hours as float (None if not hours). 'A'/'ABSENT' is treated as absent."""
+    if x is None or (isinstance(x, float) and pd.isna(x)):
         return None
-    if isinstance(x, (int, float)):
-        return float(x)
     s = str(x).strip()
-    if s == "" or s.lower() in {"off","a","absent","leave","holiday","-","--"}:
+    if s == "" or s.lower() in {"off","leave","holiday","-","--"} or is_absent_cell(s):
         return None
+    # HH:MM[:SS]
     if re.fullmatch(r"\d{1,2}:\d{2}(:\d{2})?", s):
         h, m, *rest = s.split(":")
         sec = int(rest[0]) if rest else 0
         return int(h) + int(m)/60 + sec/3600
+    # 8h 30m or 8 Hrs
     m = re.search(r"(\d+(\.\d+)?)\s*h", s, re.I)
     if m:
         hours = float(m.group(1))
@@ -449,11 +459,14 @@ def build_ot_report_wide(df_att, month_label=""):
         raise ValueError("Could not find day columns 1..31 in the attendance sheet.")
 
     id_vars = [c for c in [name_col, code_col] if c in df_att.columns]
-    long = df_att.melt(id_vars=id_vars, value_vars=day_cols, var_name="DayLabel", value_name="HoursRaw")
+    long = df_att.melt(id_vars=id_vars, value_vars=day_cols, var_name="DayLabel", value_name="CellRaw")
+
     long["Day"] = long["DayLabel"].map(coerce_day_label)
     long.dropna(subset=["Day"], inplace=True)
     long["Day"] = long["Day"].astype(int)
-    long["Hours"] = long["HoursRaw"].map(parse_hours_cell)
+
+    long["Is_Absent"] = long["CellRaw"].map(is_absent_cell)
+    long["Hours"] = long["CellRaw"].map(parse_hours_cell)
     long["OT_Hours"] = (long["Hours"] - ot_threshold).clip(lower=0)
     long["Has_OT"] = long["OT_Hours"] > 0
     if month_label:
@@ -463,6 +476,7 @@ def build_ot_report_wide(df_att, month_label=""):
     summary = (
         long.groupby(group_cols, dropna=False)
             .agg(
+                Absent_Days=("Is_Absent", lambda s: int(s.sum())),
                 Days_With_OT=("Has_OT", lambda s: int(s.sum())),
                 Total_OT_Hours=("OT_Hours", "sum"),
                 Total_Work_Hours=("Hours", "sum"),
@@ -475,11 +489,12 @@ def build_ot_report_wide(df_att, month_label=""):
 def monthly_totals(summary_raw: pd.DataFrame, daily_long: pd.DataFrame, month_label: str):
     if summary_raw.empty:
         return pd.DataFrame([{
-            "Month": month_label, "Employees": 0, "Days_With_OT": 0,
-            "Total_OT_Hours": 0.0, "Total_Work_Hours": 0.0,
+            "Month": month_label, "Employees": 0, "Total_Absent_Days": 0,
+            "Days_With_OT": 0, "Total_OT_Hours": 0.0, "Total_Work_Hours": 0.0,
             "Days_Recorded": 0, "Avg_Work_Hours_per_Day": 0.0
         }])
     employees         = int(len(summary_raw))
+    total_absent      = int(summary_raw["Absent_Days"].sum())
     days_with_ot      = int(summary_raw["Days_With_OT"].sum())
     total_ot_hours    = float(summary_raw["Total_OT_Hours"].sum())
     total_work_hours  = float(summary_raw["Total_Work_Hours"].sum())
@@ -488,6 +503,7 @@ def monthly_totals(summary_raw: pd.DataFrame, daily_long: pd.DataFrame, month_la
     return pd.DataFrame([{
         "Month": month_label,
         "Employees": employees,
+        "Total_Absent_Days": total_absent,
         "Days_With_OT": days_with_ot,
         "Total_OT_Hours": round(total_ot_hours, 2),
         "Total_Work_Hours": round(total_work_hours, 2),
@@ -504,8 +520,7 @@ if att_file:
 
         summary_raw, daily_long, name_col, code_col = build_ot_report_wide(df_att, month_label=att_sheet)
 
-        # HIDE per-employee grid — do not st.dataframe(summary)
-        # Show Monthly Totals only:
+        # Hide per-employee summary grid on UI (still available via download)
         month_totals_df = monthly_totals(summary_raw, daily_long, att_sheet)
         st.write("**Monthly Totals (all employees)**")
         st.dataframe(month_totals_df, use_container_width=True)

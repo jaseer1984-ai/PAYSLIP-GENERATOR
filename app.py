@@ -387,6 +387,8 @@ def pick_col(norm_map, *candidates):
     return None
 
 ABSENT_TOKENS = {"a", "absent"}  # extend if needed
+PRESENT_TOKENS = {"p", "present"}
+OFF_TOKENS = {"off", "leave", "holiday"}
 
 def is_absent_cell(x):
     if x is None or (isinstance(x, float) and pd.isna(x)):
@@ -394,13 +396,30 @@ def is_absent_cell(x):
     s = str(x).strip().lower()
     return s in ABSENT_TOKENS
 
+def is_present_token(x):
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return False
+    s = str(x).strip().lower()
+    return s in PRESENT_TOKENS
+
+def is_off_token(x):
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return False
+    s = str(x).strip().lower()
+    return s in OFF_TOKENS
+
 def parse_hours_cell(x):
-    """Return hours as float (None if not hours). 'A'/'ABSENT' is treated as absent."""
+    """Return hours as float (None if not hours). 'A'/'ABSENT' => absent. 'P' => present 8 hours."""
     if x is None or (isinstance(x, float) and pd.isna(x)):
         return None
     s = str(x).strip()
-    if s == "" or s.lower() in {"off","leave","holiday","-","--"} or is_absent_cell(s):
+    sl = s.lower()
+    if sl in OFF_TOKENS or sl in {"-","--",""}:
         return None
+    if sl in ABSENT_TOKENS:
+        return 0.0
+    if sl in PRESENT_TOKENS:
+        return 8.0
     # HH:MM[:SS]
     if re.fullmatch(r"\d{1,2}:\d{2}(:\d{2})?", s):
         h, m, *rest = s.split(":")
@@ -690,8 +709,7 @@ if multi_files:
             long["OT_Rate"] = (long["Basic"]/30.0/8.0) * default_ot_multiplier
 
             # Daily split & costing
-            long["OT_Hours"] = (long["Hours"].fillna(0) - ot_threshold).clip(lower=0)
-            long["Worked_Flag"] = (~long["Is_Absent"]) & (long["Hours"].fillna(0) > 0)
+            # Deduplicate multiple entries for same Project+Employee+Day: k
             long["Base_Daily_Cost"] = long["Salary_Day"].where(long["Worked_Flag"], other=0.0)
             long["OT_Cost"] = long["OT_Hours"] * long["OT_Rate"]
             long["Total_Daily_Cost"] = long["Base_Daily_Cost"] + long["OT_Cost"]

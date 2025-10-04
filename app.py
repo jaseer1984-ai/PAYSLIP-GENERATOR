@@ -33,6 +33,9 @@ EMP_CODE_CANDIDATES = ["employee code", "emp code", "emp id", "employee id", "co
 DESIGNATION_CANDIDATES = ["designation", "title", "position", "proffession", "profession", "job title"]
 ABSENT_DAYS_CANDIDATES = ["leave/days", "leave days", "absent days", "absent", "leave"]
 PAY_PERIOD_CANDIDATES = ["pay period", "period", "month", "pay month"]
+RATE_CANDIDATES = [
+    "rate", "hourly rate", "per hour", "cost per hour", "wage", "salary/hour", "hr rate", "hour rate"
+]
 
 EARNINGS_LETTERS = {
     "Basic Pay": "F",
@@ -272,6 +275,9 @@ with st.expander("Settings", expanded=True):
     colA, colB = st.columns([2,1])
     company_name = colA.text_input("Company name", value=DEFAULT_COMPANY)
     page_size_label = colB.selectbox("Page size", list(PAGE_SIZES.keys()), index=0)
+    default_hourly_rate = colA.number_input("Default hourly rate (if sheet has no rate)", min_value=0.0, value=0.0, step=0.5)
+    default_ot_multiplier = colB.number_input("OT multiplier (× rate)", min_value=1.0, value=1.25, step=0.05)
+
 title = st.text_input("PDF heading text", value=DEFAULT_TITLE)
 
 with st.expander("Branding (optional)", expanded=False):
@@ -280,6 +286,7 @@ with st.expander("Branding (optional)", expanded=False):
     logo_file = c2.file_uploader("Logo (PNG/JPG)", type=["png","jpg","jpeg"])
 
 excel_file = st.file_uploader("Upload Payroll Excel (.xlsx)", type=["xlsx"])
+
 
 def build_std_for_row(row_series, row_vals, norm_map, max_cols, pay_period_text=""):
     emp_name = clean(get_value(row_series, norm_map, EMP_NAME_CANDIDATES))
@@ -360,11 +367,12 @@ if excel_file:
 #       OVERTIME REPORT (WIDE 1..31 FORMAT) + ABSENT COUNT
 # ==========================================================
 st.markdown("---")
-st.subheader("Overtime Report (Daily > 8 hours)")
+st.subheader("Overtime Report (Daily > threshold)")
 
 att_file = st.file_uploader("Upload Attendance Excel (.xlsx)", type=["xlsx"], key="attendance")
-ot_threshold = st.number_input("Daily threshold (hours)", min_value=0.0, max_value=24.0, value=8.0, step=0.5)
+ot_threshold = st.number_input("Daily OT threshold (hours)", min_value=0.0, max_value=24.0, value=8.0, step=0.5)
 
+# ---- helpers (attendance) ----
 def norm_cols_map(columns):
     return {str(c).strip().lower(): c for c in columns}
 
@@ -378,7 +386,6 @@ def pick_col(norm_map, *candidates):
                 return v
     return None
 
-# ---- parse helpers for attendance ----
 ABSENT_TOKENS = {"a", "absent"}  # extend if needed
 
 def is_absent_cell(x):
@@ -447,7 +454,8 @@ def promote_day_header_if_needed(df, look_first_rows=6):
         return new_df
     return df
 
-def build_ot_report_wide(df_att, month_label=""):
+# --- Core builder (single sheet) now returns cost-aware daily_long ---
+def build_ot_report_wide(df_att, month_label="", rate_col_name=None, default_rate=0.0, ot_threshold=8.0, ot_multiplier=1.25):
     df_att = promote_day_header_if_needed(df_att)
     df_att.columns = [str(c).strip() for c in df_att.columns]
     nm = norm_cols_map(df_att.columns)
@@ -458,8 +466,29 @@ def build_ot_report_wide(df_att, month_label=""):
     if not day_cols:
         raise ValueError("Could not find day columns 1..31 in the attendance sheet.")
 
+    # detect rate column if not given
+    rate_col = rate_col_name
+    if rate_col is None:
+        for cand in RATE_CANDIDATES:
+            col = pick_col(nm, cand)
+            if col:
+                rate_col = col
+                break
+
     id_vars = [c for c in [name_col, code_col] if c in df_att.columns]
+    keep_cols = id_vars + ([rate_col] if rate_col in df_att.columns else [])
+
     long = df_att.melt(id_vars=id_vars, value_vars=day_cols, var_name="DayLabel", value_name="CellRaw")
+
+    # bring rate to long (if present)
+    if rate_col in df_att.columns:
+        long = long.merge(
+            df_att[keep_cols].drop_duplicates(),
+            on=id_vars, how="left"
+        )
+        long.rename(columns={rate_col: "Rate"}, inplace=True)
+    else:
+        long["Rate"] = default_rate
 
     long["Day"] = long["DayLabel"].map(coerce_day_label)
     long.dropna(subset=["Day"], inplace=True)
@@ -467,12 +496,21 @@ def build_ot_report_wide(df_att, month_label=""):
 
     long["Is_Absent"] = long["CellRaw"].map(is_absent_cell)
     long["Hours"] = long["CellRaw"].map(parse_hours_cell)
-    long["OT_Hours"] = (long["Hours"] - ot_threshold).clip(lower=0)
+
+    # base vs OT hours
+    long["Base_Hours"] = long["Hours"].fillna(0).clip(upper=ot_threshold)
+    long["OT_Hours"] = (long["Hours"].fillna(0) - ot_threshold).clip(lower=0)
     long["Has_OT"] = long["OT_Hours"] > 0
+
+    # cost calculation
+    long["Base_Cost"] = long["Base_Hours"] * long["Rate"]
+    long["OT_Cost"] = long["OT_Hours"] * long["Rate"] * ot_multiplier
+    long["Total_Cost"] = long["Base_Cost"] + long["OT_Cost"]
+
     if month_label:
         long["Month"] = month_label
 
-    group_cols = [code_col, name_col]
+    group_cols = [c for c in [code_col, name_col] if c in long.columns]
     summary = (
         long.groupby(group_cols, dropna=False)
             .agg(
@@ -480,17 +518,23 @@ def build_ot_report_wide(df_att, month_label=""):
                 Days_With_OT=("Has_OT", lambda s: int(s.sum())),
                 Total_OT_Hours=("OT_Hours", "sum"),
                 Total_Work_Hours=("Hours", "sum"),
+                Base_Cost=("Base_Cost", "sum"),
+                OT_Cost=("OT_Cost", "sum"),
+                Total_Cost=("Total_Cost", "sum"),
                 Days_Recorded=("Hours", lambda s: int(s.notna().sum())),
+                Avg_Rate=("Rate", "mean"),
             )
             .reset_index()
     )
     return summary, long, name_col, code_col
+
 
 def monthly_totals(summary_raw: pd.DataFrame, daily_long: pd.DataFrame, month_label: str):
     if summary_raw.empty:
         return pd.DataFrame([{
             "Month": month_label, "Employees": 0, "Total_Absent_Days": 0,
             "Days_With_OT": 0, "Total_OT_Hours": 0.0, "Total_Work_Hours": 0.0,
+            "Base_Cost": 0.0, "OT_Cost": 0.0, "Total_Cost": 0.0,
             "Days_Recorded": 0, "Avg_Work_Hours_per_Day": 0.0
         }])
     employees         = int(len(summary_raw))
@@ -498,6 +542,9 @@ def monthly_totals(summary_raw: pd.DataFrame, daily_long: pd.DataFrame, month_la
     days_with_ot      = int(summary_raw["Days_With_OT"].sum())
     total_ot_hours    = float(summary_raw["Total_OT_Hours"].sum())
     total_work_hours  = float(summary_raw["Total_Work_Hours"].sum())
+    base_cost         = float(summary_raw["Base_Cost"].sum())
+    ot_cost           = float(summary_raw["OT_Cost"].sum())
+    total_cost        = float(summary_raw["Total_Cost"].sum())
     days_recorded     = int(summary_raw["Days_Recorded"].sum())
     avg_work_per_day  = float(daily_long["Hours"].mean()) if not daily_long.empty else 0.0
     return pd.DataFrame([{
@@ -507,6 +554,9 @@ def monthly_totals(summary_raw: pd.DataFrame, daily_long: pd.DataFrame, month_la
         "Days_With_OT": days_with_ot,
         "Total_OT_Hours": round(total_ot_hours, 2),
         "Total_Work_Hours": round(total_work_hours, 2),
+        "Base_Cost": round(base_cost, 2),
+        "OT_Cost": round(ot_cost, 2),
+        "Total_Cost": round(total_cost, 2),
         "Days_Recorded": days_recorded,
         "Avg_Work_Hours_per_Day": round(avg_work_per_day, 2),
     }])
@@ -518,11 +568,14 @@ if att_file:
         df_att = pd.read_excel(xls2, sheet_name=att_sheet, header=0)
         st.success(f"Attendance loaded from sheet '{att_sheet}' with {len(df_att)} rows.")
 
-        summary_raw, daily_long, name_col, code_col = build_ot_report_wide(df_att, month_label=att_sheet)
+        summary_raw, daily_long, name_col, code_col = build_ot_report_wide(
+            df_att, month_label=att_sheet,
+            default_rate=default_hourly_rate, ot_threshold=ot_threshold, ot_multiplier=default_ot_multiplier
+        )
 
         # Hide per-employee summary grid on UI (still available via download)
         month_totals_df = monthly_totals(summary_raw, daily_long, att_sheet)
-        st.write("**Monthly Totals (all employees)**")
+        st.write("**Monthly Totals (single file)**")
         st.dataframe(month_totals_df, use_container_width=True)
 
         # Downloads
@@ -554,18 +607,158 @@ if att_file:
         st.error(f"Failed to build OT report: {e}")
         st.code(traceback.format_exc(), language="python")
 
+# ==========================================================
+#   NEW: MULTI-PROJECT TIMESHEETS (CONSOLIDATE & COSTING)
+# ==========================================================
+st.markdown("---")
+st.subheader("Multi‑Project Timesheets — Consolidated Hours & Cost")
+
+multi_files = st.file_uploader(
+    "Upload month’s project timesheets (select multiple .xlsx)", type=["xlsx"], accept_multiple_files=True, key="multi_att"
+)
+
+month_name_guess = st.text_input("Month label (used in outputs)", value="")
+
+if multi_files:
+    all_project_summaries = []
+    all_project_daily = []
+
+    for f in multi_files:
+        try:
+            # Parse project name from filename: e.g., "SEP DHE VILLA.xlsx" -> Month: SEP, Project: DHE VILLA
+            fname = f.name
+            base = re.sub(r"\.xlsx$", "", fname, flags=re.I)
+            parts = re.split(r"[\s_\-]+", base, maxsplit=1)
+            if len(parts) == 2:
+                month_from_file, project_from_file = parts[0], parts[1]
+            else:
+                month_from_file, project_from_file = (parts[0], base)
+
+            xls = pd.ExcelFile(f)
+            sheet = xls.sheet_names[0]
+            dfp = pd.read_excel(xls, sheet_name=sheet, header=0)
+
+            summary, daily, name_col, code_col = build_ot_report_wide(
+                dfp,
+                month_label=(month_name_guess or month_from_file),
+                default_rate=default_hourly_rate,
+                ot_threshold=ot_threshold,
+                ot_multiplier=default_ot_multiplier,
+            )
+
+            # Add project column
+            summary.insert(0, "Project", project_from_file)
+            daily.insert(0, "Project", project_from_file)
+
+            # Keep the ID column names consistent for later merges
+            if code_col not in summary.columns:
+                summary.insert(1, "Employee Code", "")
+            if name_col not in summary.columns:
+                summary.insert(2, "Employee Name", "")
+
+            all_project_summaries.append(summary)
+            all_project_daily.append(daily)
+
+        except Exception as e:
+            st.error(f"Failed to parse {f.name}: {e}")
+            st.code(traceback.format_exc(), language="python")
+
+    if all_project_summaries:
+        proj_summary = pd.concat(all_project_summaries, ignore_index=True)
+        proj_daily = pd.concat(all_project_daily, ignore_index=True)
+
+        # ---------- Project-wise totals ----------
+        project_totals = (
+            proj_daily.groupby(["Project"], dropna=False)
+                .agg(
+                    Employees=("Employee Name", lambda s: s.nunique()),
+                    Total_Work_Hours=("Hours", "sum"),
+                    Total_OT_Hours=("OT_Hours", "sum"),
+                    Base_Cost=("Base_Cost", "sum"),
+                    OT_Cost=("OT_Cost", "sum"),
+                    Total_Cost=("Total_Cost", "sum"),
+                    Days_Recorded=("Hours", lambda s: int(s.notna().sum())),
+                )
+                .reset_index()
+                .sort_values("Project")
+        )
+
+        st.markdown("#### Project‑wise Cost Summary")
+        st.dataframe(project_totals, use_container_width=True)
+
+        # ---------- Combined monthly (all projects) ----------
+        combined_monthly = monthly_totals(
+            proj_summary.rename(columns={"Total_Work_Hours":"Total_Work_Hours", "Total_OT_Hours":"Total_OT_Hours"}),
+            proj_daily,
+            month_label=(month_name_guess or proj_daily["Month"].iloc[0] if "Month" in proj_daily.columns and len(proj_daily)>0 else "")
+        )
+
+        st.markdown("#### Combined Monthly Totals (All Projects)")
+        st.dataframe(combined_monthly, use_container_width=True)
+
+        # ---------- Employee‑wise across projects ----------
+        emp_across = (
+            proj_daily.groupby(["Employee Name"], dropna=False)
+                .agg(
+                    Projects_Worked=("Project", lambda s: ", ".join(sorted(pd.Series(s).dropna().unique()))),
+                    Total_Work_Hours=("Hours", "sum"),
+                    Total_OT_Hours=("OT_Hours", "sum"),
+                    Base_Cost=("Base_Cost", "sum"),
+                    OT_Cost=("OT_Cost", "sum"),
+                    Total_Cost=("Total_Cost", "sum"),
+                )
+                .reset_index()
+                .sort_values("Employee Name")
+        )
+
+        st.markdown("#### Employee‑wise Consolidation (Across Projects)")
+        st.dataframe(emp_across, use_container_width=True)
+
+        # ---------- Downloads ----------
+        @st.cache_data
+        def to_csv_bytes(df):
+            return df.to_csv(index=False).encode("utf-8")
+
+        @st.cache_data
+        def to_xlsx_bytes(dfs: dict):
+            bio = io.BytesIO()
+            with pd.ExcelWriter(bio, engine="xlsxwriter") as writer:
+                for sheet, df in dfs.items():
+                    df.to_excel(writer, index=False, sheet_name=sheet[:31])
+            bio.seek(0)
+            return bio.read()
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.download_button("⬇️ Project Totals (CSV)", data=to_csv_bytes(project_totals), file_name="Project_Totals.csv")
+        c2.download_button("⬇️ Employee Across Projects (CSV)", data=to_csv_bytes(emp_across), file_name="Employees_Across_Projects.csv")
+        c3.download_button("⬇️ All Daily (CSV)", data=to_csv_bytes(proj_daily), file_name="All_Daily_Rows.csv")
+        c4.download_button(
+            "⬇️ Excel Pack (All Tabs)",
+            data=to_xlsx_bytes({
+                "Project_Totals": project_totals,
+                "Employees_Across": emp_across,
+                "Daily_Long": proj_daily,
+                "Per_File_Summary": proj_summary,
+            }),
+            file_name="Timesheet_Consolidated.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+        with st.expander("Preview — Daily Long (All Projects)", expanded=False):
+            st.dataframe(proj_daily, use_container_width=True)
+
 # --- UI footer: Powered By Jaseer (NOT in PDFs) ---
 st.markdown(
-    """
+    f"""
     <style>
-      .stApp { padding-bottom: 60px; }
-      .custom-footer {
+      .stApp {{ padding-bottom: 60px; }}
+      .custom-footer {{
         position: fixed; left: 0; right: 0; bottom: 0;
         text-align: center; padding: 10px 0;
         color: #6b7280; font-size: 12px; background: rgba(255,255,255,0.7);
-      }
+      }}
     </style>
-    <div class="custom-footer">""" + UI_POWERED_BY_TEXT + """</div>
+    <div class=\"custom-footer\">{UI_POWERED_BY_TEXT}</div>
     """,
     unsafe_allow_html=True,
 )

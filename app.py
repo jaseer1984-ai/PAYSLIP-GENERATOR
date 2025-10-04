@@ -388,7 +388,7 @@ def pick_col(norm_map, *candidates):
 
 ABSENT_TOKENS = {"a", "absent"}
 PRESENT_TOKENS = {"p", "present"}
-OFF_TOKENS = {"off", "leave", "holiday"}
+OFF_TOKENS = {"off","leave","holiday"}
 
 def is_absent_cell(x):
     if x is None or (isinstance(x, float) and pd.isna(x)):
@@ -419,10 +419,10 @@ def parse_hours_cell(x):
         sec = int(rest[0]) if rest else 0
         return int(h) + int(m)/60 + sec/3600
     # 8h 30m or 8 Hrs
-    m = re.search(r"(\d+(\.\d+)?)\\s*h", s, re.I)
+    m = re.search(r"(\d+(\.\d+)?)\s*h", s, re.I)
     if m:
         hours = float(m.group(1))
-        m2 = re.search(r"(\\d+)\\s*m", s, re.I)
+        m2 = re.search(r"(\d+)\s*m", s, re.I)
         if m2:
             hours += int(m2.group(1))/60
         return hours
@@ -441,7 +441,7 @@ def coerce_day_label(val):
             return i
     except:
         pass
-    m = re.match(r"^\\s*(\\d{1,2})\\b", s)
+    m = re.match(r"^\s*(\d{1,2})\b", s)
     if m:
         i = int(m.group(1))
         if 1 <= i <= 31:
@@ -471,10 +471,10 @@ MONTH_MAP = {"JAN":1,"JANUARY":1,"FEB":2,"FEBRUARY":2,"MAR":3,"MARCH":3,"APR":4,
 def parse_month_year(label: str):
     s = str(label or "").strip().upper()
     month = next((v for k,v in MONTH_MAP.items() if k in s), None)
-    m_year = re.search(r"(20\\d{2}|19\\d{2})", s)
+    m_year = re.search(r"(20\d{2}|19\d{2})", s)
     year = int(m_year.group(1)) if m_year else datetime.today().year
     if month is None:
-        m = re.search(r"\\b(\\d{1,2})[/-](\\d{4})\\b", s)  # e.g., 09-2025
+        m = re.search(r"\b(\d{1,2})[/-](\d{4})\b", s)  # e.g., 09-2025
         if m:
             month = int(m.group(1)); year = int(m.group(2))
     if month is None:
@@ -564,7 +564,6 @@ def build_ot_report_wide(df_att, month_label="", rate_col_name=None, default_rat
     )
     return summary, long, name_col, code_col
 
-
 def monthly_totals(summary_raw: pd.DataFrame, daily_long: pd.DataFrame, month_label: str):
     if summary_raw.empty:
         return pd.DataFrame([{
@@ -600,7 +599,7 @@ def monthly_totals(summary_raw: pd.DataFrame, daily_long: pd.DataFrame, month_la
 if att_file:
     try:
         xls2 = pd.ExcelFile(att_file)
-        att_sheet = xls2.sheet_names[0]
+        att_sheet = xls2.sheet_names[0]          # SHEET = month label
         df_att = pd.read_excel(xls2, sheet_name=att_sheet, header=0)
         st.success(f"Attendance loaded from sheet '{att_sheet}' with {len(df_att)} rows.")
 
@@ -613,6 +612,7 @@ if att_file:
         st.write("**Monthly Totals (single file)**")
         st.dataframe(month_totals_df, use_container_width=True)
 
+        # Downloads
         @st.cache_data
         def to_csv_bytes(df): return df.to_csv(index=False).encode("utf-8")
         @st.cache_data
@@ -624,14 +624,11 @@ if att_file:
             return bio.read()
 
         c1, c2, c3 = st.columns(3)
-        c1.download_button("⬇️ Download OT Summary (CSV)",
-                           data=to_csv_bytes(summary_raw),
+        c1.download_button("⬇️ Download OT Summary (CSV)", data=to_csv_bytes(summary_raw),
                            file_name=f"OT_Summary_{att_sheet}.csv", mime="text/csv")
-        c2.download_button("⬇️ Download Monthly Totals (CSV)",
-                           data=to_csv_bytes(month_totals_df),
+        c2.download_button("⬇️ Download Monthly Totals (CSV)", data=to_csv_bytes(month_totals_df),
                            file_name=f"OT_Monthly_Totals_{att_sheet}.csv", mime="text/csv")
-        c3.download_button("⬇️ Download Daily Long (CSV)",
-                           data=to_csv_bytes(daily_long),
+        c3.download_button("⬇️ Download Daily Long (CSV)", data=to_csv_bytes(daily_long),
                            file_name=f"OT_Daily_{att_sheet}.csv", mime="text/csv")
 
         with st.expander("Show daily long data (one row per employee-day)", expanded=False):
@@ -643,7 +640,7 @@ if att_file:
 
 # ==========================================================
 #   MULTI-PROJECT TIMESHEETS (CONSOLIDATE & DAILY COSTING)
-#   • Month = SHEET NAME (used to build Date)
+#   • Month = SHEET NAME
 #   • Real calendar Date = (sheet month + Day)
 #   • OT rate = BASIC/30/8 × OT_MULTIPLIER
 #   • Base daily pay = Salary/Day else Gross/30
@@ -656,8 +653,6 @@ multi_files = st.file_uploader(
     type=["xlsx"], accept_multiple_files=True, key="multi_att"
 )
 
-month_name_guess = st.text_input("Month label (override, optional)", value="")
-
 PAY_BASIC_CANDS  = ["basic", "basic salary", "basic pay"]
 PAY_GROSS_CANDS  = ["gross salary", "gross", "total salary"]
 PAY_SALDAY_CANDS = ["salary/day", "salary per day", "per day salary", "day salary"]
@@ -668,20 +663,15 @@ if multi_files:
 
     for f in multi_files:
         try:
-            # Parse month + project from filename, e.g. "SEP DHE VILLA.xlsx"
+            # Project name from file; MONTH from SHEET NAME
             fname = f.name
-            base = re.sub(r"\\.xlsx$", "", fname, flags=re.I)
-            parts = re.split(r"[\\s_\\-]+", base, maxsplit=1)
-            if len(parts) == 2:
-                month_from_file, project_from_file = parts[0], parts[1]
-            else:
-                month_from_file, project_from_file = (parts[0], base)
+            project_from_file = re.sub(r"\.xlsx$", "", fname, flags=re.I)
 
             xls = pd.ExcelFile(f)
-            sheet = xls.sheet_names[0]              # SHEET = month label
+            sheet = xls.sheet_names[0]                      # SHEET = month label
             dfp = pd.read_excel(xls, sheet_name=sheet, header=0)
 
-            # Normalize wide sheet and identify columns
+            # ----- normalize wide sheet and identify columns -----
             dfp2 = promote_day_header_if_needed(dfp)
             dfp2.columns = [str(c).strip() for c in dfp2.columns]
             nm = norm_cols_map(dfp2.columns)
@@ -716,15 +706,15 @@ if multi_files:
             long["Is_Absent"] = long["CellRaw"].map(is_absent_cell)
             long["Is_Present_Tok"] = long["CellRaw"].map(is_present_token)
             long["Hours"] = long["CellRaw"].map(parse_hours_cell)
+
             # Treat bare 'P' as 8 hours if Hours empty/0
             mask_fill_8h = long["Is_Present_Tok"] & (long["Hours"].isna() | (long["Hours"] == 0))
             long.loc[mask_fill_8h, "Hours"] = 8.0
 
-            # De-duplicate same Project+Employee+Day within this file
+            # Insert project first, then de-dup per Project+Employee+Day
             long.insert(0, "Project", project_from_file)
-            long = long.sort_values(["Project","Employee Code","Day","Hours"],
-                                    ascending=[True,True,True,False]) \
-                       .drop_duplicates(subset=["Project","Employee Code","Day"], keep="first")
+            long = long.sort_values(["Project","Employee Code","Day","Hours"], ascending=[True,True,True,False])
+            long = long.drop_duplicates(subset=["Project","Employee Code","Day"], keep="first")
 
             # Rates
             long["Basic"] = pd.to_numeric(long[basic_col], errors="coerce").fillna(0.0) if basic_col in long.columns else 0.0
@@ -741,10 +731,9 @@ if multi_files:
             long["OT_Cost"] = long["OT_Hours"] * long["OT_Rate"]
             long["Total_Daily_Cost"] = long["Base_Daily_Cost"] + long["OT_Cost"]
 
-            # Month & real calendar Date (from sheet name unless override provided)
-            month_label_for_date = (sheet or month_name_guess or month_from_file)
-            long["Month"] = (month_name_guess or sheet or month_from_file)
-            yy, mm = parse_month_year(month_label_for_date)
+            # Month & real calendar Date (from sheet name)
+            long["Month"] = sheet
+            yy, mm = parse_month_year(sheet)
             try:
                 long["Date"] = pd.to_datetime(dict(year=yy, month=mm, day=long["Day"]), errors="coerce")
             except Exception:
@@ -781,29 +770,27 @@ if multi_files:
         projects = sorted(proj_daily["Project"].dropna().unique().tolist())
         sel_projects = st.multiselect("Projects", projects, default=projects)
 
-        # TWO CALENDARS: FROM and TO (fallback to day slider if Date is missing)
+        # Calendar From → To (fallback to day slider if Date missing)
         if "Date" in proj_daily.columns and not proj_daily["Date"].isna().all():
             min_date = pd.to_datetime(proj_daily["Date"].min()).date()
             max_date = pd.to_datetime(proj_daily["Date"].max()).date()
-            cfrom, cto = st.columns(2)
-            date_from = cfrom.date_input("From", value=min_date, min_value=min_date, max_value=max_date)
-            date_to   = cto.date_input("To",   value=max_date, min_value=min_date, max_value=max_date)
-            if date_from > date_to:
-                date_from, date_to = date_to, date_from
-            mask = (
-                proj_daily["Project"].isin(sel_projects)
-                & proj_daily["Date"].between(pd.to_datetime(date_from), pd.to_datetime(date_to))
+            date_from, date_to = st.date_input(
+                "Date range", value=(min_date, max_date),
+                min_value=min_date, max_value=max_date
+            )
+            mask = proj_daily["Project"].isin(sel_projects) & proj_daily["Date"].between(
+                pd.to_datetime(date_from), pd.to_datetime(date_to)
             )
         else:
-            # fallback to day range slider
             min_day, max_day = int(proj_daily["Day"].min()), int(proj_daily["Day"].max())
-            day_start, day_end = st.slider("Day range", min_value=min_day, max_value=max_day, value=(min_day, max_day))
-            mask = proj_daily["Project"].isin(sel_projects) & (proj_daily["Day"].between(day_start, day_end))
+            day_from, day_to = st.slider("Day range", min_value=min_day, max_value=max_day, value=(min_day, max_day))
+            mask = proj_daily["Project"].isin(sel_projects) & (proj_daily["Day"].between(int(day_from), int(day_to)))
 
         filt_daily = proj_daily.loc[mask].copy()
 
-        # ---------- Ensure required columns exist ----------
-        for c in ["Hours","OT_Hours","Base_Daily_Cost","OT_Cost","Total_Daily_Cost","Day"]:
+        # ---------- Ensure required columns exist to avoid KeyError ----------
+        required_num_cols = ["Hours","OT_Hours","Base_Daily_Cost","OT_Cost","Total_Daily_Cost","Day"]
+        for c in required_num_cols:
             if c not in filt_daily.columns:
                 filt_daily[c] = 0.0
             filt_daily[c] = pd.to_numeric(filt_daily[c], errors="coerce").fillna(0.0)
@@ -811,7 +798,7 @@ if multi_files:
             if c not in filt_daily.columns:
                 filt_daily[c] = "" if c == "Employee Name" else False
 
-        # ---------------- Attendance Summary ----------------
+        # ---------------- Attendance Summary (present/absent per employee & project) ----------------
         attendance_summary = (
             filt_daily.groupby(["Project","Employee Code","Employee Name"], dropna=False)
                 .agg(

@@ -1,5 +1,6 @@
-streamlit
 pandas
-openpyxl
+streamlit
+xlsxwriter
 reportlab
 num2words
+openpyxl

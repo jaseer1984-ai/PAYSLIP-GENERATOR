@@ -78,7 +78,6 @@ def parse_number(x):
     try:
         return float(s)
     except:
-        # HH:MM[:SS] as hours
         if re.fullmatch(r"\d{1,2}:\d{2}(:\d{2})?", s):
             h, m2, *rest = s.split(":")
             sec = int(rest[0]) if rest else 0
@@ -472,9 +471,8 @@ def parse_month_year(label: str):
 # ========================== DISPLAY-ONLY FORMATTING ==========================
 def fmt_commas(df, money_cols=None, hour_cols=None, int_cols=None,
                decimals_money=2, decimals_hours=2):
-    """Return a Styler with comma formatting for Streamlit display only."""
     if df is None or len(df) == 0:
-        return df  # Streamlit can handle empty/raw df
+        return df
     money_cols = [c for c in (money_cols or []) if c in df.columns]
     hour_cols  = [c for c in (hour_cols  or []) if c in df.columns]
     int_cols   = [c for c in (int_cols   or []) if c in df.columns]
@@ -505,15 +503,13 @@ if multi_files:
 
     for f in multi_files:
         try:
-            # Project name from file; MONTH from SHEET NAME
             fname = f.name
             project_from_file = re.sub(r"\.xlsx$", "", fname, flags=re.I)
 
             xls = pd.ExcelFile(f)
-            sheet = xls.sheet_names[0]                      # SHEET = month label
+            sheet = xls.sheet_names[0]
             dfp = pd.read_excel(xls, sheet_name=sheet, header=0)
 
-            # ----- normalize wide sheet and identify columns -----
             dfp2 = promote_day_header_if_needed(dfp)
             dfp2.columns = [str(c).strip() for c in dfp2.columns]
             nm = norm_cols_map(dfp2.columns)
@@ -530,18 +526,15 @@ if multi_files:
             id_vars = [c for c in [name_col, code_col] if c in dfp2.columns]
             long = dfp2.melt(id_vars=id_vars, value_vars=day_cols, var_name="DayLabel", value_name="CellRaw")
 
-            # Attach pay columns
             carry = id_vars.copy()
             if basic_col: carry.append(basic_col)
             if gross_col: carry.append(gross_col)
             if salday_col: carry.append(salday_col)
             long = long.merge(dfp2[carry].drop_duplicates(), on=id_vars, how="left")
 
-            # Standardize identifiers
             long["Employee Name"] = long[name_col] if name_col in long.columns else ""
             long["Employee Code"] = long[code_col] if code_col in long.columns else ""
 
-            # Day / Hours
             long["Day"] = long["DayLabel"].map(coerce_day_label)
             long.dropna(subset=["Day"], inplace=True)
             long["Day"] = long["Day"].astype(int)
@@ -553,12 +546,10 @@ if multi_files:
             mask_fill_8h = long["Is_Present_Tok"] & (long["Hours"].isna() | (long["Hours"] == 0))
             long.loc[mask_fill_8h, "Hours"] = 8.0
 
-            # Insert project first, then de-dup per Project+Employee+Day
             long.insert(0, "Project", project_from_file)
             long = long.sort_values(["Project","Employee Code","Day","Hours"], ascending=[True,True,True,False])
             long = long.drop_duplicates(subset=["Project","Employee Code","Day"], keep="first")
 
-            # Rates
             long["Basic"] = pd.to_numeric(long[basic_col], errors="coerce").fillna(0.0) if basic_col in long.columns else 0.0
             if salday_col and salday_col in long.columns:
                 long["Salary_Day"] = pd.to_numeric(long[salday_col], errors="coerce")
@@ -566,7 +557,6 @@ if multi_files:
                 long["Salary_Day"] = (pd.to_numeric(long[gross_col], errors="coerce")/30.0) if gross_col in long.columns else 0.0
             long["OT_Rate"] = (long["Basic"]/30.0/8.0) * default_ot_multiplier
 
-            # Daily split & costing
             ot_threshold = 8.0
             long["OT_Hours"] = (long["Hours"].fillna(0) - ot_threshold).clip(lower=0)
             long["Worked_Flag"] = ((~long["Is_Absent"]) & (long["Hours"].fillna(0) > 0)) | long["Is_Present_Tok"]
@@ -574,7 +564,6 @@ if multi_files:
             long["OT_Cost"] = long["OT_Hours"] * long["OT_Rate"]
             long["Total_Daily_Cost"] = long["Base_Daily_Cost"] + long["OT_Cost"]
 
-            # Month & real calendar Date (from sheet name)
             long["Month"] = sheet
             yy, mm = parse_month_year(sheet)
             try:
@@ -582,23 +571,7 @@ if multi_files:
             except Exception:
                 long["Date"] = pd.NaT
 
-            # Per-employee rollup (per file)
-            emp_sum = (
-                long.groupby(["Project","Employee Code","Employee Name"], dropna=False)
-                    .agg(
-                        Present_Days=("Worked_Flag", lambda s: int(s.sum())),
-                        Absent_Days=("Is_Absent", lambda s: int(s.sum())),
-                        OT_Days=("OT_Hours", lambda s: int((s>0).sum())),
-                        OT_Hours=("OT_Hours","sum"),
-                        Total_Hours=("Hours","sum"),
-                        Base_Cost=("Base_Daily_Cost","sum"),
-                        OT_Cost=("OT_Cost","sum"),
-                        Total_Cost=("Total_Daily_Cost","sum"),
-                    ).reset_index()
-            )
-
             all_daily.append(long)
-            all_emp_summaries.append(emp_sum)
 
         except Exception as e:
             st.error(f"Failed to parse {f.name}: {e}")
@@ -606,7 +579,6 @@ if multi_files:
 
     if all_daily:
         proj_daily = pd.concat(all_daily, ignore_index=True)
-        _ = pd.concat(all_emp_summaries, ignore_index=True)  # kept for parity; not used directly below
 
         # ---------------- Dashboard Filters ----------------
         st.markdown("### Filters")
@@ -619,15 +591,11 @@ if multi_files:
             max_date = pd.to_datetime(proj_daily["Date"].max()).date()
 
             c_from, c_to = st.columns(2)
-            date_from = c_from.date_input(
-                "From date", value=min_date, min_value=min_date, max_value=max_date, key="from_date"
-            )
-            date_to = c_to.date_input(
-                "To date", value=max_date, min_value=min_date, max_value=max_date, key="to_date"
-            )
+            date_from = c_from.date_input("From date", value=min_date, min_value=min_date, max_value=max_date, key="from_date")
+            date_to = c_to.date_input("To date", value=max_date, min_value=min_date, max_value=max_date, key="to_date")
 
             if date_from > date_to:
-                date_from, date_to = date_to, date_from  # keep range valid
+                date_from, date_to = date_to, date_from
 
             mask = proj_daily["Project"].isin(sel_projects) & proj_daily["Date"].between(
                 pd.to_datetime(date_from), pd.to_datetime(date_to)
@@ -639,7 +607,7 @@ if multi_files:
 
         filt_daily = proj_daily.loc[mask].copy()
 
-        # ===== Silently remove fully-absent employees =====
+        # ===== Remove fully-absent employees (no work at all in range) =====
         if not filt_daily.empty:
             emp_presence = (
                 filt_daily.groupby(["Project","Employee Code","Employee Name"], dropna=False)
@@ -650,7 +618,6 @@ if multi_files:
                 (emp_presence["Total_Work_Hours"] > 0) | (emp_presence["Worked_Days"] > 0),
                 ["Project","Employee Code"]
             ].drop_duplicates()
-
             if not present_keys.empty:
                 filt_daily = filt_daily.merge(present_keys, on=["Project","Employee Code"], how="inner")
             else:
@@ -666,7 +633,7 @@ if multi_files:
             if c not in filt_daily.columns:
                 filt_daily[c] = "" if c == "Employee Name" else False
 
-        # ---------------- Aggregations ----------------
+        # ---------------- Attendance Summary (includes absences) ----------------
         attendance_summary = (
             filt_daily.groupby(["Project","Employee Code","Employee Name"], dropna=False)
                 .agg(
@@ -681,8 +648,13 @@ if multi_files:
                 ).reset_index().sort_values(["Project","Employee Name"])
         )
 
-        if len(filt_daily) == 0:
-            st.info("No rows for the current filters.")
+        # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+        # IMPORTANT: Drop absent-day transactions from all costing outputs
+        work_daily = filt_daily.loc[filt_daily["Worked_Flag"] == True].copy()
+        # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+        if len(work_daily) == 0:
+            st.info("No worked-day rows for the current filters.")
             by_proj_day = pd.DataFrame(columns=[
                 "Project","Day","Employees","Hours","OT_Hours","Base_Cost","OT_Cost","Total_Cost",
                 "Cum_Hours","Cum_OT_Hours","Cum_Base_Cost","Cum_OT_Cost","Cum_Total_Cost","Accumulated"
@@ -693,9 +665,9 @@ if multi_files:
             ])
             project_totals = pd.DataFrame(columns=["Project","Employees","Total_Work_Hours","Total_OT_Hours","Base_Cost","OT_Cost","Total_Cost"])
         else:
-            # -------- Project × Day with accumulated totals --------
+            # -------- Project × Day with accumulated totals (worked only) --------
             by_proj_day = (
-                filt_daily.groupby(["Project","Day"], dropna=False)
+                work_daily.groupby(["Project","Day"], dropna=False)
                     .agg(
                         Employees=("Employee Name", lambda s: s.nunique()),
                         Hours=("Hours","sum"),
@@ -710,12 +682,11 @@ if multi_files:
             by_proj_day["Cum_Base_Cost"]  = by_proj_day.groupby("Project")["Base_Cost"].cumsum()
             by_proj_day["Cum_OT_Cost"]    = by_proj_day.groupby("Project")["OT_Cost"].cumsum()
             by_proj_day["Cum_Total_Cost"] = by_proj_day.groupby("Project")["Total_Cost"].cumsum()
-            # user-friendly alias
             by_proj_day["Accumulated"]    = by_proj_day["Cum_Total_Cost"]
 
-            # -------- Employee Daily with accumulated + total hours --------
+            # -------- Employee Daily with accumulated + total hours (worked only) --------
             emp_daily = (
-                filt_daily[[
+                work_daily[[
                     "Project","Employee Code","Employee Name","Day","Hours","OT_Hours",
                     "Salary_Day","OT_Rate","Base_Daily_Cost","OT_Cost","Total_Daily_Cost"
                 ]].sort_values(["Project","Employee Code","Day"])
@@ -723,9 +694,9 @@ if multi_files:
             emp_daily["Total_Hours"] = emp_daily["Hours"].fillna(0) + emp_daily["OT_Hours"].fillna(0)
             emp_daily["Accumulated"] = emp_daily.groupby(["Project","Employee Code"])["Total_Daily_Cost"].cumsum()
 
-            # -------- Project-wise totals (filtered) --------
+            # -------- Project-wise totals (worked only) --------
             project_totals = (
-                filt_daily.groupby(["Project"], dropna=False)
+                work_daily.groupby(["Project"], dropna=False)
                     .agg(
                         Employees=("Employee Name", lambda s: s.nunique()),
                         Total_Work_Hours=("Hours", "sum"),
@@ -736,7 +707,7 @@ if multi_files:
                     ).reset_index().sort_values("Project")
             )
 
-        # ---------------- Dashboard tables (comma-formatted) ----------------
+        # ---------------- Dashboard tables ----------------
         st.markdown("#### Attendance Summary (Filtered)")
         st.dataframe(
             fmt_commas(
@@ -748,7 +719,7 @@ if multi_files:
             use_container_width=True
         )
 
-        st.markdown("#### Project × Day — Daily Costing (with Accumulated Totals)")
+        st.markdown("#### Project × Day — Daily Costing (worked days only)")
         st.dataframe(
             fmt_commas(
                 by_proj_day,
@@ -759,7 +730,7 @@ if multi_files:
             use_container_width=True
         )
 
-        st.markdown("#### Employee Daily Detail (with Total Hours & Accumulated)")
+        st.markdown("#### Employee Daily Detail (worked days only)")
         st.dataframe(
             fmt_commas(
                 emp_daily,
@@ -770,7 +741,7 @@ if multi_files:
             use_container_width=True
         )
 
-        st.markdown("#### Project-wise Totals (Filtered)")
+        st.markdown("#### Project-wise Totals (worked days only)")
         st.dataframe(
             fmt_commas(
                 project_totals,
@@ -781,7 +752,7 @@ if multi_files:
             use_container_width=True
         )
 
-        # ---------------- Downloads (keep numeric) ----------------
+        # ---------------- Downloads (worked days only) ----------------
         @st.cache_data
         def to_csv_bytes(df):
             return df.to_csv(index=False).encode("utf-8")
@@ -807,7 +778,7 @@ if multi_files:
                 "Employee_Daily": emp_daily,
                 "Project_Totals": project_totals,
                 "Attendance_Summary": attendance_summary,
-                "Daily_Long_All": filt_daily,
+                "Daily_Long_All": work_daily,  # note: worked-only rows
             }),
             file_name="Timesheet_DailyCost_Filtered.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

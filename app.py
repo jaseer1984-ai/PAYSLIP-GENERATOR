@@ -78,6 +78,7 @@ def parse_number(x):
     try:
         return float(s)
     except:
+        # HH:MM[:SS] as hours
         if re.fullmatch(r"\d{1,2}:\d{2}(:\d{2})?", s):
             h, m2, *rest = s.split(":")
             sec = int(rest[0]) if rest else 0
@@ -362,7 +363,7 @@ if excel_file:
                            file_name=f"Payslips_{sheet_name}_{run_id}.zip", mime="application/zip")
 
 # ==========================================================
-#        SHARED HELPERS NEEDED FOR MULTI-PROJECT SECTION
+#        SHARED HELPERS (MULTI-PROJECT SECTION)
 # ==========================================================
 def norm_cols_map(columns):
     return {str(c).strip().lower(): c for c in columns}
@@ -454,7 +455,6 @@ def promote_day_header_if_needed(df, look_first_rows=6):
         return new_df
     return df
 
-# Month parser for sheet names like "SEP 2025", "SEPTEMBER-2025", "2025-09"
 MONTH_MAP = {"JAN":1,"JANUARY":1,"FEB":2,"FEBRUARY":2,"MAR":3,"MARCH":3,"APR":4,"APRIL":4,"MAY":5,"JUN":6,"JUNE":6,"JUL":7,"JULY":7,"AUG":8,"AUGUST":8,"SEP":9,"SEPT":9,"SEPTEMBER":9,"OCT":10,"OCTOBER":10,"NOV":11,"NOVEMBER":11,"DEC":12,"DECEMBER":12}
 def parse_month_year(label: str):
     s = str(label or "").strip().upper()
@@ -468,6 +468,21 @@ def parse_month_year(label: str):
     if month is None:
         month = datetime.today().month
     return year, month
+
+# ========================== DISPLAY-ONLY FORMATTING ==========================
+def fmt_commas(df, money_cols=None, hour_cols=None, int_cols=None,
+               decimals_money=2, decimals_hours=2):
+    """Return a Styler with comma formatting for Streamlit display only."""
+    if df is None or len(df) == 0:
+        return df  # Streamlit can handle empty/raw df
+    money_cols = [c for c in (money_cols or []) if c in df.columns]
+    hour_cols  = [c for c in (hour_cols  or []) if c in df.columns]
+    int_cols   = [c for c in (int_cols   or []) if c in df.columns]
+    fmts = {}
+    fmts.update({c: f"{{:,.{decimals_money}f}}" for c in money_cols})
+    fmts.update({c: f"{{:,.{decimals_hours}f}}" for c in hour_cols})
+    fmts.update({c: "{:,.0f}" for c in int_cols})
+    return df.style.format(fmts)
 
 # ==========================================================
 #   MULTI-PROJECT TIMESHEETS (CONSOLIDATE & DAILY COSTING)
@@ -490,13 +505,15 @@ if multi_files:
 
     for f in multi_files:
         try:
+            # Project name from file; MONTH from SHEET NAME
             fname = f.name
             project_from_file = re.sub(r"\.xlsx$", "", fname, flags=re.I)
 
             xls = pd.ExcelFile(f)
-            sheet = xls.sheet_names[0]
+            sheet = xls.sheet_names[0]                      # SHEET = month label
             dfp = pd.read_excel(xls, sheet_name=sheet, header=0)
 
+            # ----- normalize wide sheet and identify columns -----
             dfp2 = promote_day_header_if_needed(dfp)
             dfp2.columns = [str(c).strip() for c in dfp2.columns]
             nm = norm_cols_map(dfp2.columns)
@@ -513,15 +530,18 @@ if multi_files:
             id_vars = [c for c in [name_col, code_col] if c in dfp2.columns]
             long = dfp2.melt(id_vars=id_vars, value_vars=day_cols, var_name="DayLabel", value_name="CellRaw")
 
+            # Attach pay columns
             carry = id_vars.copy()
             if basic_col: carry.append(basic_col)
             if gross_col: carry.append(gross_col)
             if salday_col: carry.append(salday_col)
             long = long.merge(dfp2[carry].drop_duplicates(), on=id_vars, how="left")
 
+            # Standardize identifiers
             long["Employee Name"] = long[name_col] if name_col in long.columns else ""
             long["Employee Code"] = long[code_col] if code_col in long.columns else ""
 
+            # Day / Hours
             long["Day"] = long["DayLabel"].map(coerce_day_label)
             long.dropna(subset=["Day"], inplace=True)
             long["Day"] = long["Day"].astype(int)
@@ -529,13 +549,16 @@ if multi_files:
             long["Is_Present_Tok"] = long["CellRaw"].map(is_present_token)
             long["Hours"] = long["CellRaw"].map(parse_hours_cell)
 
+            # Treat bare 'P' as 8 hours if Hours empty/0
             mask_fill_8h = long["Is_Present_Tok"] & (long["Hours"].isna() | (long["Hours"] == 0))
             long.loc[mask_fill_8h, "Hours"] = 8.0
 
+            # Insert project first, then de-dup per Project+Employee+Day
             long.insert(0, "Project", project_from_file)
             long = long.sort_values(["Project","Employee Code","Day","Hours"], ascending=[True,True,True,False])
             long = long.drop_duplicates(subset=["Project","Employee Code","Day"], keep="first")
 
+            # Rates
             long["Basic"] = pd.to_numeric(long[basic_col], errors="coerce").fillna(0.0) if basic_col in long.columns else 0.0
             if salday_col and salday_col in long.columns:
                 long["Salary_Day"] = pd.to_numeric(long[salday_col], errors="coerce")
@@ -543,12 +566,15 @@ if multi_files:
                 long["Salary_Day"] = (pd.to_numeric(long[gross_col], errors="coerce")/30.0) if gross_col in long.columns else 0.0
             long["OT_Rate"] = (long["Basic"]/30.0/8.0) * default_ot_multiplier
 
-            long["OT_Hours"] = (long["Hours"].fillna(0) - 8.0).clip(lower=0)
+            # Daily split & costing
+            ot_threshold = 8.0
+            long["OT_Hours"] = (long["Hours"].fillna(0) - ot_threshold).clip(lower=0)
             long["Worked_Flag"] = ((~long["Is_Absent"]) & (long["Hours"].fillna(0) > 0)) | long["Is_Present_Tok"]
             long["Base_Daily_Cost"] = long["Salary_Day"].where(long["Worked_Flag"], other=0.0)
             long["OT_Cost"] = long["OT_Hours"] * long["OT_Rate"]
             long["Total_Daily_Cost"] = long["Base_Daily_Cost"] + long["OT_Cost"]
 
+            # Month & real calendar Date (from sheet name)
             long["Month"] = sheet
             yy, mm = parse_month_year(sheet)
             try:
@@ -556,6 +582,7 @@ if multi_files:
             except Exception:
                 long["Date"] = pd.NaT
 
+            # Per-employee rollup (per file)
             emp_sum = (
                 long.groupby(["Project","Employee Code","Employee Name"], dropna=False)
                     .agg(
@@ -600,7 +627,7 @@ if multi_files:
             )
 
             if date_from > date_to:
-                date_from, date_to = date_to, date_from
+                date_from, date_to = date_to, date_from  # keep range valid
 
             mask = proj_daily["Project"].isin(sel_projects) & proj_daily["Date"].between(
                 pd.to_datetime(date_from), pd.to_datetime(date_to)
@@ -612,7 +639,7 @@ if multi_files:
 
         filt_daily = proj_daily.loc[mask].copy()
 
-        # ===== Remove fully-absent employees (silent) =====
+        # ===== Silently remove fully-absent employees =====
         if not filt_daily.empty:
             emp_presence = (
                 filt_daily.groupby(["Project","Employee Code","Employee Name"], dropna=False)
@@ -639,6 +666,7 @@ if multi_files:
             if c not in filt_daily.columns:
                 filt_daily[c] = "" if c == "Employee Name" else False
 
+        # ---------------- Aggregations ----------------
         attendance_summary = (
             filt_daily.groupby(["Project","Employee Code","Employee Name"], dropna=False)
                 .agg(
@@ -672,7 +700,8 @@ if multi_files:
             )
             emp_daily = (
                 filt_daily[[
-                    "Project","Employee Code","Employee Name","Day","Hours","OT_Hours","Salary_Day","OT_Rate","Base_Daily_Cost","OT_Cost","Total_Daily_Cost"
+                    "Project","Employee Code","Employee Name","Day","Hours","OT_Hours",
+                    "Salary_Day","OT_Rate","Base_Daily_Cost","OT_Cost","Total_Daily_Cost"
                 ]].sort_values(["Project","Employee Name","Day"])
             )
             project_totals = (
@@ -687,18 +716,52 @@ if multi_files:
                     ).reset_index().sort_values("Project")
             )
 
+        # ---------------- Dashboard tables (comma-formatted) ----------------
         st.markdown("#### Attendance Summary (Filtered)")
-        st.dataframe(attendance_summary, use_container_width=True)
+        st.dataframe(
+            fmt_commas(
+                attendance_summary,
+                money_cols=["Base_Cost","OT_Cost","Total_Cost"],
+                hour_cols=["Total_Hours","OT_Hours"],
+                int_cols=["Present_Days","Absent_Days","OT_Days"]
+            ),
+            use_container_width=True
+        )
 
         st.markdown("#### Project × Day — Daily Costing")
-        st.dataframe(by_proj_day, use_container_width=True)
+        st.dataframe(
+            fmt_commas(
+                by_proj_day,
+                money_cols=["Base_Cost","OT_Cost","Total_Cost"],
+                hour_cols=["Hours","OT_Hours"],
+                int_cols=["Employees","Day"]
+            ),
+            use_container_width=True
+        )
 
         st.markdown("#### Employee Daily Detail")
-        st.dataframe(emp_daily, use_container_width=True)
+        st.dataframe(
+            fmt_commas(
+                emp_daily,
+                money_cols=["Salary_Day","OT_Rate","Base_Daily_Cost","OT_Cost","Total_Daily_Cost"],
+                hour_cols=["Hours","OT_Hours"],
+                int_cols=["Day"]
+            ),
+            use_container_width=True
+        )
 
         st.markdown("#### Project-wise Totals (Filtered)")
-        st.dataframe(project_totals, use_container_width=True)
+        st.dataframe(
+            fmt_commas(
+                project_totals,
+                money_cols=["Base_Cost","OT_Cost","Total_Cost"],
+                hour_cols=["Total_Work_Hours","Total_OT_Hours"],
+                int_cols=["Employees"]
+            ),
+            use_container_width=True
+        )
 
+        # ---------------- Downloads (keep numeric) ----------------
         @st.cache_data
         def to_csv_bytes(df):
             return df.to_csv(index=False).encode("utf-8")

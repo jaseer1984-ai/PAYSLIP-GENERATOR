@@ -287,7 +287,6 @@ with st.expander("Branding (optional)", expanded=False):
 
 excel_file = st.file_uploader("Upload Payroll Excel (.xlsx)", type=["xlsx"])
 
-
 def build_std_for_row(row_series, row_vals, norm_map, max_cols, pay_period_text=""):
     emp_name = clean(get_value(row_series, norm_map, EMP_NAME_CANDIDATES))
     emp_code = clean(get_value(row_series, norm_map, EMP_CODE_CANDIDATES))
@@ -364,15 +363,9 @@ if excel_file:
                            file_name=f"Payslips_{sheet_name}_{run_id}.zip", mime="application/zip")
 
 # ==========================================================
-#       OVERTIME REPORT (WIDE 1..31 FORMAT) + ABSENT COUNT
+#        SHARED HELPERS NEEDED FOR MULTI-PROJECT SECTION
+# (Kept here without rendering any "Overtime Report" UI)
 # ==========================================================
-st.markdown("---")
-st.subheader("Overtime Report (Daily > threshold)")
-
-att_file = st.file_uploader("Upload Attendance Excel (.xlsx)", type=["xlsx"], key="attendance")
-ot_threshold = st.number_input("Daily OT threshold (hours)", min_value=0.0, max_value=24.0, value=8.0, step=0.5)
-
-# ---- helpers (attendance) ----
 def norm_cols_map(columns):
     return {str(c).strip().lower(): c for c in columns}
 
@@ -466,7 +459,6 @@ def promote_day_header_if_needed(df, look_first_rows=6):
         return new_df
     return df
 
-# Month parser for sheet names like "SEP 2025", "SEPTEMBER-2025", "2025-09"
 MONTH_MAP = {"JAN":1,"JANUARY":1,"FEB":2,"FEBRUARY":2,"MAR":3,"MARCH":3,"APR":4,"APRIL":4,"MAY":5,"JUN":6,"JUNE":6,"JUL":7,"JULY":7,"AUG":8,"AUGUST":8,"SEP":9,"SEPT":9,"SEPTEMBER":9,"OCT":10,"OCTOBER":10,"NOV":11,"NOVEMBER":11,"DEC":12,"DECEMBER":12}
 def parse_month_year(label: str):
     s = str(label or "").strip().upper()
@@ -480,163 +472,6 @@ def parse_month_year(label: str):
     if month is None:
         month = datetime.today().month
     return year, month
-
-# --- Core builder (single sheet) now returns cost-aware daily_long ---
-def build_ot_report_wide(df_att, month_label="", rate_col_name=None, default_rate=0.0, ot_threshold=8.0, ot_multiplier=1.25):
-    df_att = promote_day_header_if_needed(df_att)
-    df_att.columns = [str(c).strip() for c in df_att.columns]
-    nm = norm_cols_map(df_att.columns)
-    name_col = pick_col(nm, "employee name", "name", "emp name", "staff name") or "NAME"
-    code_col = pick_col(nm, "employee code", "emp code", "code", "id") or "E CODE"
-
-    day_cols = detect_day_columns_from_headers(df_att)
-    if not day_cols:
-        raise ValueError("Could not find day columns 1..31 in the attendance sheet.")
-
-    # detect rate column if not given
-    rate_col = rate_col_name
-    if rate_col is None:
-        for cand in RATE_CANDIDATES:
-            col = pick_col(nm, cand)
-            if col:
-                rate_col = col
-                break
-
-    id_vars = [c for c in [name_col, code_col] if c in df_att.columns]
-    keep_cols = id_vars + ([rate_col] if (rate_col and rate_col in df_att.columns) else [])
-
-    long = df_att.melt(id_vars=id_vars, value_vars=day_cols, var_name="DayLabel", value_name="CellRaw")
-
-    # bring rate to long (if present)
-    if rate_col and rate_col in df_att.columns:
-        long = long.merge(dfp_att := df_att[keep_cols].drop_duplicates(), on=id_vars, how="left")
-        long.rename(columns={rate_col: "Rate"}, inplace=True)
-    else:
-        long["Rate"] = default_rate
-
-    long["Day"] = long["DayLabel"].map(coerce_day_label)
-    long.dropna(subset=["Day"], inplace=True)
-    long["Day"] = long["Day"].astype(int)
-
-    long["Is_Absent"] = long["CellRaw"].map(is_absent_cell)
-    long["Is_Present_Tok"] = long["CellRaw"].map(is_present_token)
-    long["Hours"] = long["CellRaw"].map(parse_hours_cell)
-
-    # Fill P=8 if Hours empty/0
-    mask_fill_8h = long["Is_Present_Tok"] & (long["Hours"].isna() | (long["Hours"] == 0))
-    long.loc[mask_fill_8h, "Hours"] = 8.0
-
-    # Base/OT hours
-    long["OT_Hours"] = (long["Hours"].fillna(0) - ot_threshold).clip(lower=0)
-    long["Worked_Flag"] = ((~long["Is_Absent"]) & (long["Hours"].fillna(0) > 0)) | long["Is_Present_Tok"]
-
-    # Costing (rate column is optional)
-    long["Base_Hours"] = long["Hours"].fillna(0).clip(upper=ot_threshold)
-    long["Base_Cost"] = long["Base_Hours"] * long["Rate"]
-    long["OT_Cost"] = long["OT_Hours"] * long["Rate"] * ot_multiplier
-    long["Total_Cost"] = long["Base_Cost"] + long["OT_Cost"]
-
-    if month_label:
-        long["Month"] = month_label
-
-    # Real Date from sheet month + Day
-    yy, mm = parse_month_year(month_label or "")
-    try:
-        long["Date"] = pd.to_datetime(dict(year=yy, month=mm, day=long["Day"]), errors="coerce")
-    except Exception:
-        long["Date"] = pd.NaT
-
-    group_cols = [c for c in [code_col, name_col] if c in long.columns]
-    summary = (
-        long.groupby(group_cols, dropna=False)
-            .agg(
-                Absent_Days=("Is_Absent", lambda s: int(s.sum())),
-                Days_With_OT=("OT_Hours", lambda s: int((s>0).sum())),
-                Total_OT_Hours=("OT_Hours", "sum"),
-                Total_Work_Hours=("Hours", "sum"),
-                Base_Cost=("Base_Cost", "sum"),
-                OT_Cost=("OT_Cost", "sum"),
-                Total_Cost=("Total_Cost", "sum"),
-                Days_Recorded=("Hours", lambda s: int(s.notna().sum())),
-                Avg_Rate=("Rate", "mean"),
-            )
-            .reset_index()
-    )
-    return summary, long, name_col, code_col
-
-def monthly_totals(summary_raw: pd.DataFrame, daily_long: pd.DataFrame, month_label: str):
-    if summary_raw.empty:
-        return pd.DataFrame([{
-            "Month": month_label, "Employees": 0, "Total_Absent_Days": 0,
-            "Days_With_OT": 0, "Total_OT_Hours": 0.0, "Total_Work_Hours": 0.0,
-            "Base_Cost": 0.0, "OT_Cost": 0.0, "Total_Cost": 0.0,
-            "Days_Recorded": 0, "Avg_Work_Hours_per_Day": 0.0
-        }])
-    employees         = int(len(summary_raw))
-    total_absent      = int(summary_raw["Absent_Days"].sum())
-    days_with_ot      = int(summary_raw["Days_With_OT"].sum())
-    total_ot_hours    = float(summary_raw["Total_OT_Hours"].sum())
-    total_work_hours  = float(summary_raw["Total_Work_Hours"].sum())
-    base_cost         = float(summary_raw["Base_Cost"].sum())
-    ot_cost           = float(summary_raw["OT_Cost"].sum())
-    total_cost        = float(summary_raw["Total_Cost"].sum())
-    days_recorded     = int(summary_raw["Days_Recorded"].sum())
-    avg_work_per_day  = float(daily_long["Hours"].mean()) if not daily_long.empty else 0.0
-    return pd.DataFrame([{
-        "Month": month_label,
-        "Employees": employees,
-        "Total_Absent_Days": total_absent,
-        "Days_With_OT": days_with_ot,
-        "Total_OT_Hours": round(total_ot_hours, 2),
-        "Total_Work_Hours": round(total_work_hours, 2),
-        "Base_Cost": round(base_cost, 2),
-        "OT_Cost": round(ot_cost, 2),
-        "Total_Cost": round(total_cost, 2),
-        "Days_Recorded": days_recorded,
-        "Avg_Work_Hours_per_Day": round(avg_work_per_day, 2),
-    }])
-
-if att_file:
-    try:
-        xls2 = pd.ExcelFile(att_file)
-        att_sheet = xls2.sheet_names[0]          # SHEET = month label
-        df_att = pd.read_excel(xls2, sheet_name=att_sheet, header=0)
-        st.success(f"Attendance loaded from sheet '{att_sheet}' with {len(df_att)} rows.")
-
-        summary_raw, daily_long, name_col, code_col = build_ot_report_wide(
-            df_att, month_label=att_sheet,
-            default_rate=default_hourly_rate, ot_threshold=ot_threshold, ot_multiplier=default_ot_multiplier
-        )
-
-        month_totals_df = monthly_totals(summary_raw, daily_long, att_sheet)
-        st.write("**Monthly Totals (single file)**")
-        st.dataframe(month_totals_df, use_container_width=True)
-
-        # Downloads
-        @st.cache_data
-        def to_csv_bytes(df): return df.to_csv(index=False).encode("utf-8")
-        @st.cache_data
-        def to_xlsx_bytes(df, sheet="Sheet1"):
-            bio = io.BytesIO()
-            with pd.ExcelWriter(bio, engine="openpyxl") as writer:
-                df.to_excel(writer, index=False, sheet_name=sheet)
-            bio.seek(0)
-            return bio.read()
-
-        c1, c2, c3 = st.columns(3)
-        c1.download_button("⬇️ Download OT Summary (CSV)", data=to_csv_bytes(summary_raw),
-                           file_name=f"OT_Summary_{att_sheet}.csv", mime="text/csv")
-        c2.download_button("⬇️ Download Monthly Totals (CSV)", data=to_csv_bytes(month_totals_df),
-                           file_name=f"OT_Monthly_Totals_{att_sheet}.csv", mime="text/csv")
-        c3.download_button("⬇️ Download Daily Long (CSV)", data=to_csv_bytes(daily_long),
-                           file_name=f"OT_Daily_{att_sheet}.csv", mime="text/csv")
-
-        with st.expander("Show daily long data (one row per employee-day)", expanded=False):
-            st.dataframe(daily_long, use_container_width=True)
-
-    except Exception as e:
-        st.error(f"Failed to build OT report: {e}")
-        st.code(traceback.format_exc(), language="python")
 
 # ==========================================================
 #   MULTI-PROJECT TIMESHEETS (CONSOLIDATE & DAILY COSTING)
@@ -725,7 +560,7 @@ if multi_files:
             long["OT_Rate"] = (long["Basic"]/30.0/8.0) * default_ot_multiplier
 
             # Daily split & costing
-            long["OT_Hours"] = (long["Hours"].fillna(0) - ot_threshold).clip(lower=0)
+            long["OT_Hours"] = (long["Hours"].fillna(0) - 8.0).clip(lower=0)  # threshold fixed here since OT UI removed
             long["Worked_Flag"] = ((~long["Is_Absent"]) & (long["Hours"].fillna(0) > 0)) | long["Is_Present_Tok"]
             long["Base_Daily_Cost"] = long["Salary_Day"].where(long["Worked_Flag"], other=0.0)
             long["OT_Cost"] = long["OT_Hours"] * long["OT_Rate"]

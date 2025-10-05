@@ -78,7 +78,6 @@ def parse_number(x):
     try:
         return float(s)
     except:
-        # accept HH:MM[:SS] as hours
         if re.fullmatch(r"\d{1,2}:\d{2}(:\d{2})?", s):
             h, m2, *rest = s.split(":")
             sec = int(rest[0]) if rest else 0
@@ -364,7 +363,6 @@ if excel_file:
 
 # ==========================================================
 #        SHARED HELPERS NEEDED FOR MULTI-PROJECT SECTION
-# (Kept here without rendering any "Overtime Report" UI)
 # ==========================================================
 def norm_cols_map(columns):
     return {str(c).strip().lower(): c for c in columns}
@@ -395,7 +393,6 @@ def is_present_token(x):
     return str(x).strip().lower() in PRESENT_TOKENS
 
 def parse_hours_cell(x):
-    """Return hours as float (None if not hours). A=0, P=8, OFF/LEAVE/HOLIDAY=None."""
     if x is None or (isinstance(x, float) and pd.isna(x)):
         return None
     s = str(x).strip()
@@ -406,12 +403,10 @@ def parse_hours_cell(x):
         return 0.0
     if sl in PRESENT_TOKENS:
         return 8.0
-    # HH:MM[:SS]
     if re.fullmatch(r"\d{1,2}:\d{2}(:\d{2})?", s):
         h, m, *rest = s.split(":")
         sec = int(rest[0]) if rest else 0
         return int(h) + int(m)/60 + sec/3600
-    # 8h 30m or 8 Hrs
     m = re.search(r"(\d+(\.\d+)?)\s*h", s, re.I)
     if m:
         hours = float(m.group(1))
@@ -466,7 +461,7 @@ def parse_month_year(label: str):
     m_year = re.search(r"(20\d{2}|19\d{2})", s)
     year = int(m_year.group(1)) if m_year else datetime.today().year
     if month is None:
-        m = re.search(r"\b(\d{1,2})[/-](\d{4})\b", s)  # e.g., 09-2025
+        m = re.search(r"\b(\d{1,2})[/-](\d{4})\b", s)
         if m:
             month = int(m.group(1)); year = int(m.group(2))
     if month is None:
@@ -475,10 +470,6 @@ def parse_month_year(label: str):
 
 # ==========================================================
 #   MULTI-PROJECT TIMESHEETS (CONSOLIDATE & DAILY COSTING)
-#   • Month = SHEET NAME
-#   • Real calendar Date = (sheet month + Day)
-#   • OT rate = BASIC/30/8 × OT_MULTIPLIER
-#   • Base daily pay = Salary/Day else Gross/30
 # ==========================================================
 st.markdown("---")
 st.subheader("Multi-Project Timesheets — Daily Costing Dashboard")
@@ -498,15 +489,13 @@ if multi_files:
 
     for f in multi_files:
         try:
-            # Project name from file; MONTH from SHEET NAME
             fname = f.name
             project_from_file = re.sub(r"\.xlsx$", "", fname, flags=re.I)
 
             xls = pd.ExcelFile(f)
-            sheet = xls.sheet_names[0]                      # SHEET = month label
+            sheet = xls.sheet_names[0]
             dfp = pd.read_excel(xls, sheet_name=sheet, header=0)
 
-            # ----- normalize wide sheet and identify columns -----
             dfp2 = promote_day_header_if_needed(dfp)
             dfp2.columns = [str(c).strip() for c in dfp2.columns]
             nm = norm_cols_map(dfp2.columns)
@@ -523,18 +512,15 @@ if multi_files:
             id_vars = [c for c in [name_col, code_col] if c in dfp2.columns]
             long = dfp2.melt(id_vars=id_vars, value_vars=day_cols, var_name="DayLabel", value_name="CellRaw")
 
-            # Attach pay columns
             carry = id_vars.copy()
             if basic_col: carry.append(basic_col)
             if gross_col: carry.append(gross_col)
             if salday_col: carry.append(salday_col)
             long = long.merge(dfp2[carry].drop_duplicates(), on=id_vars, how="left")
 
-            # Standardize identifiers
             long["Employee Name"] = long[name_col] if name_col in long.columns else ""
             long["Employee Code"] = long[code_col] if code_col in long.columns else ""
 
-            # Day / Hours
             long["Day"] = long["DayLabel"].map(coerce_day_label)
             long.dropna(subset=["Day"], inplace=True)
             long["Day"] = long["Day"].astype(int)
@@ -542,16 +528,13 @@ if multi_files:
             long["Is_Present_Tok"] = long["CellRaw"].map(is_present_token)
             long["Hours"] = long["CellRaw"].map(parse_hours_cell)
 
-            # Treat bare 'P' as 8 hours if Hours empty/0
             mask_fill_8h = long["Is_Present_Tok"] & (long["Hours"].isna() | (long["Hours"] == 0))
             long.loc[mask_fill_8h, "Hours"] = 8.0
 
-            # Insert project first, then de-dup per Project+Employee+Day
             long.insert(0, "Project", project_from_file)
             long = long.sort_values(["Project","Employee Code","Day","Hours"], ascending=[True,True,True,False])
             long = long.drop_duplicates(subset=["Project","Employee Code","Day"], keep="first")
 
-            # Rates
             long["Basic"] = pd.to_numeric(long[basic_col], errors="coerce").fillna(0.0) if basic_col in long.columns else 0.0
             if salday_col and salday_col in long.columns:
                 long["Salary_Day"] = pd.to_numeric(long[salday_col], errors="coerce")
@@ -559,14 +542,12 @@ if multi_files:
                 long["Salary_Day"] = (pd.to_numeric(long[gross_col], errors="coerce")/30.0) if gross_col in long.columns else 0.0
             long["OT_Rate"] = (long["Basic"]/30.0/8.0) * default_ot_multiplier
 
-            # Daily split & costing
-            long["OT_Hours"] = (long["Hours"].fillna(0) - 8.0).clip(lower=0)  # threshold fixed here since OT UI removed
+            long["OT_Hours"] = (long["Hours"].fillna(0) - 8.0).clip(lower=0)
             long["Worked_Flag"] = ((~long["Is_Absent"]) & (long["Hours"].fillna(0) > 0)) | long["Is_Present_Tok"]
             long["Base_Daily_Cost"] = long["Salary_Day"].where(long["Worked_Flag"], other=0.0)
             long["OT_Cost"] = long["OT_Hours"] * long["OT_Rate"]
             long["Total_Daily_Cost"] = long["Base_Daily_Cost"] + long["OT_Cost"]
 
-            # Month & real calendar Date (from sheet name)
             long["Month"] = sheet
             yy, mm = parse_month_year(sheet)
             try:
@@ -574,7 +555,6 @@ if multi_files:
             except Exception:
                 long["Date"] = pd.NaT
 
-            # Per-employee rollup (per file)
             emp_sum = (
                 long.groupby(["Project","Employee Code","Employee Name"], dropna=False)
                     .agg(
@@ -605,14 +585,24 @@ if multi_files:
         projects = sorted(proj_daily["Project"].dropna().unique().tolist())
         sel_projects = st.multiselect("Projects", projects, default=projects)
 
-        # Calendar From → To (fallback to day slider if Date missing)
+        # Separate From / To date pickers (fallback to day slider)
         if "Date" in proj_daily.columns and not proj_daily["Date"].isna().all():
             min_date = pd.to_datetime(proj_daily["Date"].min()).date()
             max_date = pd.to_datetime(proj_daily["Date"].max()).date()
-            date_from, date_to = st.date_input(
-                "Date range", value=(min_date, max_date),
-                min_value=min_date, max_value=max_date
+
+            c_from, c_to = st.columns(2)
+            date_from = c_from.date_input(
+                "From date", value=min_date, min_value=min_date, max_value=max_date, key="from_date"
             )
+            date_to = c_to.date_input(
+                "To date", value=max_date, min_value=min_date, max_value=max_date, key="to_date"
+            )
+
+            # auto-correct if user picks an inverted range
+            if date_from > date_to:
+                date_from, date_to = date_to, date_from
+                st.info("Swapped dates so that From ≤ To.")
+
             mask = proj_daily["Project"].isin(sel_projects) & proj_daily["Date"].between(
                 pd.to_datetime(date_from), pd.to_datetime(date_to)
             )
@@ -623,7 +613,7 @@ if multi_files:
 
         filt_daily = proj_daily.loc[mask].copy()
 
-        # ---------- Ensure required columns exist to avoid KeyError ----------
+        # ---------- Ensure required columns exist ----------
         required_num_cols = ["Hours","OT_Hours","Base_Daily_Cost","OT_Cost","Total_Daily_Cost","Day"]
         for c in required_num_cols:
             if c not in filt_daily.columns:
@@ -633,7 +623,6 @@ if multi_files:
             if c not in filt_daily.columns:
                 filt_daily[c] = "" if c == "Employee Name" else False
 
-        # ---------------- Attendance Summary (present/absent per employee & project) ----------------
         attendance_summary = (
             filt_daily.groupby(["Project","Employee Code","Employee Name"], dropna=False)
                 .agg(
@@ -648,7 +637,6 @@ if multi_files:
                 ).reset_index().sort_values(["Project","Employee Name"])
         )
 
-        # ---------------- Project × Day totals ----------------
         if len(filt_daily) == 0:
             st.info("No rows for the current filters.")
             by_proj_day = pd.DataFrame(columns=["Project","Day","Employees","Hours","OT_Hours","Base_Cost","OT_Cost","Total_Cost"])
@@ -666,15 +654,11 @@ if multi_files:
                         Total_Cost=("Total_Daily_Cost","sum"),
                     ).reset_index().sort_values(["Project","Day"])
             )
-
-            # ---------------- Employee daily detail ----------------
             emp_daily = (
                 filt_daily[[
                     "Project","Employee Code","Employee Name","Day","Hours","OT_Hours","Salary_Day","OT_Rate","Base_Daily_Cost","OT_Cost","Total_Daily_Cost"
                 ]].sort_values(["Project","Employee Name","Day"])
             )
-
-            # ---------------- Project-wise totals (filtered) ----------------
             project_totals = (
                 filt_daily.groupby(["Project"], dropna=False)
                     .agg(
@@ -699,7 +683,6 @@ if multi_files:
         st.markdown("#### Project-wise Totals (Filtered)")
         st.dataframe(project_totals, use_container_width=True)
 
-        # ---------------- Downloads ----------------
         @st.cache_data
         def to_csv_bytes(df):
             return df.to_csv(index=False).encode("utf-8")
@@ -731,7 +714,7 @@ if multi_files:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-# --- UI footer: Powered By Jaseer (NOT in PDFs) ---
+# --- UI footer ---
 st.markdown(
     f"""
     <style>

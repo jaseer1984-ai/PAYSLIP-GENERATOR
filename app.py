@@ -606,7 +606,7 @@ if multi_files:
 
     if all_daily:
         proj_daily = pd.concat(all_daily, ignore_index=True)
-        proj_summary = pd.concat(all_emp_summaries, ignore_index=True)
+        _ = pd.concat(all_emp_summaries, ignore_index=True)  # kept for parity; not used directly below
 
         # ---------------- Dashboard Filters ----------------
         st.markdown("### Filters")
@@ -683,10 +683,17 @@ if multi_files:
 
         if len(filt_daily) == 0:
             st.info("No rows for the current filters.")
-            by_proj_day = pd.DataFrame(columns=["Project","Day","Employees","Hours","OT_Hours","Base_Cost","OT_Cost","Total_Cost"])
-            emp_daily = pd.DataFrame(columns=["Project","Employee Code","Employee Name","Day","Hours","OT_Hours","Salary_Day","OT_Rate","Base_Daily_Cost","OT_Cost","Total_Daily_Cost"])
+            by_proj_day = pd.DataFrame(columns=[
+                "Project","Day","Employees","Hours","OT_Hours","Base_Cost","OT_Cost","Total_Cost",
+                "Cum_Hours","Cum_OT_Hours","Cum_Base_Cost","Cum_OT_Cost","Cum_Total_Cost","Accumulated"
+            ])
+            emp_daily = pd.DataFrame(columns=[
+                "Project","Employee Code","Employee Name","Day","Hours","OT_Hours","Total_Hours",
+                "Salary_Day","OT_Rate","Base_Daily_Cost","OT_Cost","Total_Daily_Cost","Accumulated"
+            ])
             project_totals = pd.DataFrame(columns=["Project","Employees","Total_Work_Hours","Total_OT_Hours","Base_Cost","OT_Cost","Total_Cost"])
         else:
+            # -------- Project × Day with accumulated totals --------
             by_proj_day = (
                 filt_daily.groupby(["Project","Day"], dropna=False)
                     .agg(
@@ -698,12 +705,25 @@ if multi_files:
                         Total_Cost=("Total_Daily_Cost","sum"),
                     ).reset_index().sort_values(["Project","Day"])
             )
+            by_proj_day["Cum_Hours"]      = by_proj_day.groupby("Project")["Hours"].cumsum()
+            by_proj_day["Cum_OT_Hours"]   = by_proj_day.groupby("Project")["OT_Hours"].cumsum()
+            by_proj_day["Cum_Base_Cost"]  = by_proj_day.groupby("Project")["Base_Cost"].cumsum()
+            by_proj_day["Cum_OT_Cost"]    = by_proj_day.groupby("Project")["OT_Cost"].cumsum()
+            by_proj_day["Cum_Total_Cost"] = by_proj_day.groupby("Project")["Total_Cost"].cumsum()
+            # user-friendly alias
+            by_proj_day["Accumulated"]    = by_proj_day["Cum_Total_Cost"]
+
+            # -------- Employee Daily with accumulated + total hours --------
             emp_daily = (
                 filt_daily[[
                     "Project","Employee Code","Employee Name","Day","Hours","OT_Hours",
                     "Salary_Day","OT_Rate","Base_Daily_Cost","OT_Cost","Total_Daily_Cost"
-                ]].sort_values(["Project","Employee Name","Day"])
+                ]].sort_values(["Project","Employee Code","Day"])
             )
+            emp_daily["Total_Hours"] = emp_daily["Hours"].fillna(0) + emp_daily["OT_Hours"].fillna(0)
+            emp_daily["Accumulated"] = emp_daily.groupby(["Project","Employee Code"])["Total_Daily_Cost"].cumsum()
+
+            # -------- Project-wise totals (filtered) --------
             project_totals = (
                 filt_daily.groupby(["Project"], dropna=False)
                     .agg(
@@ -728,23 +748,23 @@ if multi_files:
             use_container_width=True
         )
 
-        st.markdown("#### Project × Day — Daily Costing")
+        st.markdown("#### Project × Day — Daily Costing (with Accumulated Totals)")
         st.dataframe(
             fmt_commas(
                 by_proj_day,
-                money_cols=["Base_Cost","OT_Cost","Total_Cost"],
-                hour_cols=["Hours","OT_Hours"],
+                money_cols=["Base_Cost","OT_Cost","Total_Cost","Cum_Base_Cost","Cum_OT_Cost","Cum_Total_Cost","Accumulated"],
+                hour_cols=["Hours","OT_Hours","Cum_Hours","Cum_OT_Hours"],
                 int_cols=["Employees","Day"]
             ),
             use_container_width=True
         )
 
-        st.markdown("#### Employee Daily Detail")
+        st.markdown("#### Employee Daily Detail (with Total Hours & Accumulated)")
         st.dataframe(
             fmt_commas(
                 emp_daily,
-                money_cols=["Salary_Day","OT_Rate","Base_Daily_Cost","OT_Cost","Total_Daily_Cost"],
-                hour_cols=["Hours","OT_Hours"],
+                money_cols=["Salary_Day","OT_Rate","Base_Daily_Cost","OT_Cost","Total_Daily_Cost","Accumulated"],
+                hour_cols=["Hours","OT_Hours","Total_Hours"],
                 int_cols=["Day"]
             ),
             use_container_width=True

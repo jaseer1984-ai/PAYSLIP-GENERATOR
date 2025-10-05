@@ -190,7 +190,7 @@ def build_pdf_for_row(std, company_name, title, page_size,
         ("GRID",(0,0),(-1,-1),0.6,colors.black), ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
         ("LEFTPADDING",(0,0),(-1,-1),3), ("RIGHTPADDING",(0,0),(-1,-1),3),
         ("TOPPADDING",(0,0),(-1,-1),2), ("BOTTOMPADDING",(0,0),(-1,-1),2),
-        ("FONTNAME",(0,0),(0,-1),"Helvetica-Bold"), ("FONTNAME",(1,0),(1,-1),"Helvetica-Bold"),
+        ("FONTNAME",(0,0),(0,0),"Helvetica-Bold"), ("FONTNAME",(1,0),(1,0),"Helvetica-Bold"),
     ]))
     elems += [hdr_tbl, Spacer(1,6)]
 
@@ -393,6 +393,11 @@ def is_present_token(x):
         return False
     return str(x).strip().lower() in PRESENT_TOKENS
 
+def is_off_cell(x):
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return False
+    return str(x).strip().lower() in OFF_TOKENS
+
 def parse_hours_cell(x):
     if x is None or (isinstance(x, float) and pd.isna(x)):
         return None
@@ -403,7 +408,7 @@ def parse_hours_cell(x):
     if sl in ABSENT_TOKENS:
         return 0.0
     if sl in PRESENT_TOKENS:
-        return 8.0
+        return None   # P is present but contributes no hours
     if re.fullmatch(r"\d{1,2}:\d{2}(:\d{2})?", s):
         h, m, *rest = s.split(":")
         sec = int(rest[0]) if rest else 0
@@ -540,11 +545,10 @@ if multi_files:
             long["Day"] = long["Day"].astype(int)
             long["Is_Absent"] = long["CellRaw"].map(is_absent_cell)
             long["Is_Present_Tok"] = long["CellRaw"].map(is_present_token)
+            long["Is_Off"] = long["CellRaw"].map(is_off_cell)
             long["Hours"] = long["CellRaw"].map(parse_hours_cell)
 
-            # Treat bare 'P' as 8 hours if Hours empty/0
-            mask_fill_8h = long["Is_Present_Tok"] & (long["Hours"].isna() | (long["Hours"] == 0))
-            long.loc[mask_fill_8h, "Hours"] = 8.0
+            # no auto-fill for "P"
 
             long.insert(0, "Project", project_from_file)
             long = long.sort_values(["Project","Employee Code","Day","Hours"], ascending=[True,True,True,False])
@@ -559,7 +563,10 @@ if multi_files:
 
             ot_threshold = 8.0
             long["OT_Hours"] = (long["Hours"].fillna(0) - ot_threshold).clip(lower=0)
-            long["Worked_Flag"] = ((~long["Is_Absent"]) & (long["Hours"].fillna(0) > 0)) | long["Is_Present_Tok"]
+
+            # P (present) OR actual hours -> worked; not absent; not off/leave/holiday
+            long["Worked_Flag"] = (long["Is_Present_Tok"] | (long["Hours"].fillna(0) > 0)) & (~long["Is_Absent"]) & (~long["Is_Off"])
+
             long["Base_Daily_Cost"] = long["Salary_Day"].where(long["Worked_Flag"], other=0.0)
             long["OT_Cost"] = long["OT_Hours"] * long["OT_Rate"]
             long["Total_Daily_Cost"] = long["Base_Daily_Cost"] + long["OT_Cost"]
@@ -633,7 +640,7 @@ if multi_files:
             if c not in filt_daily.columns:
                 filt_daily[c] = "" if c == "Employee Name" else False
 
-        # ---------------- Attendance Summary (includes absences) ----------------
+        # ---------------- Attendance Summary (includes P days) ----------------
         attendance_summary = (
             filt_daily.groupby(["Project","Employee Code","Employee Name"], dropna=False)
                 .agg(
@@ -648,7 +655,7 @@ if multi_files:
                 ).reset_index().sort_values(["Project","Employee Name"])
         )
 
-        # IMPORTANT: Drop absent-day transactions from costing outputs
+        # Worked-day dataset (includes P days; excludes off/leave/absent)
         work_daily = filt_daily.loc[filt_daily["Worked_Flag"] == True].copy()
 
         if len(work_daily) == 0:
@@ -755,7 +762,7 @@ if multi_files:
         def to_csv_bytes(df):
             return df.to_csv(index=False).encode("utf-8")
 
-        # Build export-only model for Project_Day_Costs (limited columns)
+        # Export-only model for Project_Day_Costs (limited columns)
         if len(work_daily) == 0:
             by_proj_day_export = pd.DataFrame(columns=[
                 "Project","Day","Employees","Hours","OT_Hours",
@@ -763,16 +770,12 @@ if multi_files:
             ])
         else:
             by_proj_day_export = by_proj_day.copy()
-            # Accumulated = running total cost per project
             by_proj_day_export["Accumulated"] = (
                 by_proj_day_export.groupby("Project")["Total_Cost"].cumsum()
             )
-            # Keep ONLY the requested headings in this order
-            export_order = [
-                "Project","Day","Employees","Hours","OT_Hours",
-                "Base_Cost","OT_Cost","Total_Cost","Accumulated"
+            by_proj_day_export = by_proj_day_export[
+                ["Project","Day","Employees","Hours","OT_Hours","Base_Cost","OT_Cost","Total_Cost","Accumulated"]
             ]
-            by_proj_day_export = by_proj_day_export[export_order]
 
         @st.cache_data
         def to_xlsx_bytes(dfs: dict):
@@ -791,13 +794,11 @@ if multi_files:
         c5.download_button(
             "⬇️ Excel Pack (All Tabs)",
             data=to_xlsx_bytes({
-                # ONLY this sheet is limited to the requested headings
-                "Project_Day_Costs": by_proj_day_export,
-                # Everything else remains unchanged
+                "Project_Day_Costs": by_proj_day_export,  # limited headings
                 "Employee_Daily": emp_daily,
                 "Project_Totals": project_totals,
                 "Attendance_Summary": attendance_summary,
-                "Daily_Long_All": work_daily,  # worked-only rows
+                "Daily_Long_All": work_daily,
             }),
             file_name="Timesheet_DailyCost_Filtered.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

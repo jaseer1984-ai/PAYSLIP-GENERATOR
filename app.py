@@ -78,6 +78,7 @@ def parse_number(x):
     try:
         return float(s)
     except:
+        # accept HH:MM[:SS] as hours
         if re.fullmatch(r"\d{1,2}:\d{2}(:\d{2})?", s):
             h, m2, *rest = s.split(":")
             sec = int(rest[0]) if rest else 0
@@ -499,7 +500,6 @@ PAY_SALDAY_CANDS = ["salary/day", "salary per day", "per day salary", "day salar
 
 if multi_files:
     all_daily = []
-    all_emp_summaries = []
 
     for f in multi_files:
         try:
@@ -648,10 +648,8 @@ if multi_files:
                 ).reset_index().sort_values(["Project","Employee Name"])
         )
 
-        # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-        # IMPORTANT: Drop absent-day transactions from all costing outputs
+        # IMPORTANT: Drop absent-day transactions from costing outputs
         work_daily = filt_daily.loc[filt_daily["Worked_Flag"] == True].copy()
-        # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
         if len(work_daily) == 0:
             st.info("No worked-day rows for the current filters.")
@@ -757,6 +755,25 @@ if multi_files:
         def to_csv_bytes(df):
             return df.to_csv(index=False).encode("utf-8")
 
+        # Build export-only model for Project_Day_Costs (limited columns)
+        if len(work_daily) == 0:
+            by_proj_day_export = pd.DataFrame(columns=[
+                "Project","Day","Employees","Hours","OT_Hours",
+                "Base_Cost","OT_Cost","Total_Cost","Accumulated"
+            ])
+        else:
+            by_proj_day_export = by_proj_day.copy()
+            # Accumulated = running total cost per project
+            by_proj_day_export["Accumulated"] = (
+                by_proj_day_export.groupby("Project")["Total_Cost"].cumsum()
+            )
+            # Keep ONLY the requested headings in this order
+            export_order = [
+                "Project","Day","Employees","Hours","OT_Hours",
+                "Base_Cost","OT_Cost","Total_Cost","Accumulated"
+            ]
+            by_proj_day_export = by_proj_day_export[export_order]
+
         @st.cache_data
         def to_xlsx_bytes(dfs: dict):
             bio = io.BytesIO()
@@ -774,11 +791,13 @@ if multi_files:
         c5.download_button(
             "⬇️ Excel Pack (All Tabs)",
             data=to_xlsx_bytes({
-                "Project_Day_Costs": by_proj_day,
+                # ONLY this sheet is limited to the requested headings
+                "Project_Day_Costs": by_proj_day_export,
+                # Everything else remains unchanged
                 "Employee_Daily": emp_daily,
                 "Project_Totals": project_totals,
                 "Attendance_Summary": attendance_summary,
-                "Daily_Long_All": work_daily,  # note: worked-only rows
+                "Daily_Long_All": work_daily,  # worked-only rows
             }),
             file_name="Timesheet_DailyCost_Filtered.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

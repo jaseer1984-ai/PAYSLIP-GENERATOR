@@ -354,7 +354,6 @@ if excel_file:
 st.markdown("---")
 st.subheader("Multi-Project Timesheets — Daily Costing Dashboard")
 
-# Toggle: normalize to 30 days (pads OFF days for short months)
 normalize_30_days = st.checkbox(
     "Normalize attendance to 30 days (pad missing days as OFF)",
     value=True,
@@ -618,7 +617,6 @@ if multi_files:
             min_date = pd.to_datetime(proj_daily["Date"].min()).date()
             max_date = pd.to_datetime(proj_daily["Date"].max()).date()
             c_from, c_to = st.columns(2)
-            # FIX: use max_date (not max_value)
             date_from = c_from.date_input("From date", value=min_date, min_value=min_date, max_value=max_date, key="from_date")
             date_to   = c_to.date_input("To date",   value=max_date, min_value=min_date, max_value=max_date, key="to_date")
             if date_from > date_to: date_from, date_to = date_to, date_from
@@ -656,7 +654,7 @@ if multi_files:
             if c not in filt_daily.columns:
                 filt_daily[c] = "" if c == "Employee Name" else False
 
-        # ===== Attendance summary (force total to 30 when normalized) =====
+        # ===== Attendance summary =====
         grp = (
             filt_daily.groupby(["Project","Employee Code","Employee Name"], dropna=False)
             .agg(
@@ -687,7 +685,7 @@ if multi_files:
             "Base_Cost","OT_Cost","Total_Cost"
         ]].sort_values(["Project","Employee Name"])
 
-        # Worked days only (includes P, excludes absent/off/leave)
+        # Worked days only
         work_daily = filt_daily.loc[filt_daily["Worked_Flag"] == True].copy()
 
         if len(work_daily) == 0:
@@ -720,7 +718,7 @@ if multi_files:
             by_proj_day["Cum_Total_Cost"] = by_proj_day.groupby("Project")["Total_Cost"].cumsum()
             by_proj_day["Accumulated"]    = by_proj_day["Cum_Total_Cost"]
 
-            # Employee Daily includes Month
+            # Employee Daily (Total_Hours placed right after OT_Hours)
             emp_daily = (
                 work_daily[[
                     "Project","Employee Code","Employee Name","Month","Day","Hours","OT_Hours",
@@ -729,6 +727,12 @@ if multi_files:
             )
             emp_daily["Total_Hours"] = emp_daily["Hours"].fillna(0) + emp_daily["OT_Hours"].fillna(0)
             emp_daily["Accumulated"] = emp_daily.groupby(["Project","Employee Code"])["Total_Daily_Cost"].cumsum()
+            # Reorder columns so Total_Hours is right after OT_Hours
+            emp_daily = emp_daily[[
+                "Project","Employee Code","Employee Name","Month","Day",
+                "Hours","OT_Hours","Total_Hours",
+                "Salary_Day","OT_Rate","Base_Daily_Cost","OT_Cost","Total_Daily_Cost","Accumulated"
+            ]]
 
             project_totals = (
                 work_daily.groupby(["Project"], dropna=False)
@@ -813,7 +817,7 @@ if multi_files:
             "⬇️ Excel Pack (All Tabs)",
             data=to_xlsx_bytes({
                 "Project_Day_Costs": by_proj_day_export,
-                "Employee_Daily": emp_daily,  # includes Month
+                "Employee_Daily": emp_daily,  # Total_Hours after OT_Hours
                 "Project_Totals": project_totals,
                 "Attendance_Summary": attendance_summary,
                 "Daily_Long_All": filt_daily.loc[filt_daily["Worked_Flag"] == True].copy(),

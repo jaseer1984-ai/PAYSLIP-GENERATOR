@@ -70,12 +70,11 @@ def parse_number(x):
         return None
     s = s.replace(",", "")
     m = re.fullmatch(r"\((\d+(\.\d+)?)\)", s)
-    if m:  # (123.45) -> -123.45
+    if m:
         s = "-" + m.group(1)
     try:
         return float(s)
     except:
-        # HH:MM[:SS] -> hours
         if re.fullmatch(r"\d{1,2}:\d{2}(:\d{2})?", s):
             h, m2, *rest = s.split(":")
             sec = int(rest[0]) if rest else 0
@@ -114,7 +113,6 @@ def get_value(row, norm_map, candidates):
                 return row[orig]
     return ""
 
-# ----- payroll column helpers -----
 def letter_value(row_values, letter, max_cols=None):
     try:
         idx = column_index_from_string(letter) - 1
@@ -273,7 +271,6 @@ with st.expander("Branding (optional)", expanded=False):
     currency_label = c1.text_input("Currency label", value="AED")
     logo_file = c2.file_uploader("Logo (PNG/JPG)", type=["png","jpg","jpeg"])
 
-# Unique key here
 excel_file = st.file_uploader("Upload Payroll Excel (.xlsx)", type=["xlsx"], key="excel_payroll_file")
 
 def build_std_for_row(row_series, row_vals, norm_map, max_cols, pay_period_text=""):
@@ -340,7 +337,7 @@ if excel_file:
                     )
                     parts = [safe_filename(std["Employee Code"]), safe_filename(std["Employee Name"])]
                     parts = [p for p in parts if p]
-                    fname = (" - ".join(parts) if parts else f"Payslip_{i+1}") + ".pdf"
+                    fname = (" ".join([p for p in parts if p]) or f"Payslip_{i+1}") + ".pdf"
                     zf.writestr(fname, pdf_bytes)
                 except Exception as e:
                     tb = traceback.format_exc()
@@ -357,14 +354,13 @@ if excel_file:
 st.markdown("---")
 st.subheader("Multi-Project Timesheets — Daily Costing Dashboard")
 
-# NEW: normalize months to 30 attendance days
+# Toggle: normalize to 30 days (pads OFF days for short months)
 normalize_30_days = st.checkbox(
     "Normalize attendance to 30 days (pad missing days as OFF)",
     value=True,
     help="If a month has <30 day columns (e.g., February), synthesize extra OFF days so summaries treat the month as 30 days."
 )
 
-# Unique key here (fixes the duplicate key error)
 multi_files = st.file_uploader(
     "Upload project timesheets (select multiple .xlsx; reads ALL worksheets in each)",
     type=["xlsx"], accept_multiple_files=True, key="multi_att_all_sheets"
@@ -406,7 +402,7 @@ def parse_hours_cell(x):
     s = str(x).strip().lower()
     if s in OFF_TOKENS or s in {"-","--",""}: return None
     if s in ABSENT_TOKENS: return 0.0
-    if s in PRESENT_TOKENS: return None   # P is paid day, but no hours
+    if s in PRESENT_TOKENS: return None
     s_orig = str(x).strip()
     if re.fullmatch(r"\d{1,2}:\d{2}(:\d{2})?", s_orig):
         h, m, *rest = s_orig.split(":"); sec = int(rest[0]) if rest else 0
@@ -448,7 +444,7 @@ def parse_month_year(label: str):
     m_year = re.search(r"(20\d{2}|19\d{2})", s)
     year = int(m_year.group(1)) if m_year else datetime.today().year
     if month is None:
-        m = re.search(r"\b(\d{1,2})[/-](\d{4})\b", s)  # 09-2025, 9/2025
+        m = re.search(r"\b(\d{1,2})[/-](\d{4})\b", s)
         if m: month = int(m.group(1)); year = int(m.group(2))
     if month is None: month = datetime.today().month
     return year, month
@@ -508,30 +504,25 @@ def tidy_one_sheet(df_sheet: pd.DataFrame, sheet_name: str, project_from_file: s
     long.dropna(subset=["Day"], inplace=True)
     long["Day"] = long["Day"].astype(int)
 
-    # --- interpret cell tokens ---
     long["Is_Absent"] = long["CellRaw"].map(is_absent_cell)
     long["Is_Present_Tok"] = long["CellRaw"].map(is_present_token)
     long["Is_Off"] = long["CellRaw"].map(is_off_cell)
-    long["Hours"] = long["CellRaw"].map(parse_hours_cell)  # 'P' -> None
+    long["Hours"] = long["CellRaw"].map(parse_hours_cell)
 
     long.insert(0, "Project", project_from_file)
     long = long.sort_values(["Project","Employee Code","Day","Hours"], ascending=[True,True,True,False])
     long = long.drop_duplicates(subset=["Project","Employee Code","Day"], keep="first")
 
-    # --- pay rates ---
     long["Basic"] = pd.to_numeric(long[basic_col], errors="coerce").fillna(0.0) if basic_col in long.columns else 0.0
     if salday_col and salday_col in long.columns:
         long["Salary_Day"] = pd.to_numeric(long[salday_col], errors="coerce")
     else:
-        # Keep salary/day as /30 policy (even for February)
         long["Salary_Day"] = (pd.to_numeric(long[gross_col], errors="coerce")/30.0) if gross_col in long.columns else 0.0
     long["OT_Rate"] = (long["Basic"]/30.0/8.0) * default_ot_multiplier
 
-    # --- OT ---
     ot_threshold = 8.0
     long["OT_Hours"] = (long["Hours"].fillna(0) - ot_threshold).clip(lower=0)
 
-    # Worked = (P or Hours>0) and not absent/off/leave/holiday
     long["Worked_Flag"] = (long["Is_Present_Tok"] | (long["Hours"].fillna(0) > 0)) & (~long["Is_Absent"]) & (~long["Is_Off"])
 
     long["Base_Daily_Cost"] = long["Salary_Day"].where(long["Worked_Flag"], other=0.0)
@@ -607,7 +598,6 @@ if multi_files:
                     df_sheet = pd.read_excel(xls, sheet_name=sheet, header=0)
                     if df_sheet.shape[0] == 0 or df_sheet.shape[1] == 0:
                         continue
-                    # pass normalize_30_days into the tidy function
                     long = tidy_one_sheet(df_sheet, sheet, project_from_file, default_ot_multiplier, normalize_30_days)
                     all_daily.append(long)
                 except Exception as inner_e:
@@ -665,20 +655,33 @@ if multi_files:
             if c not in filt_daily.columns:
                 filt_daily[c] = "" if c == "Employee Name" else False
 
-        # Attendance summary (P counts as present; no hours added)
-        attendance_summary = (
+        # ===== Attendance summary (force total to 30 when normalized) =====
+        grp = (
             filt_daily.groupby(["Project","Employee Code","Employee Name"], dropna=False)
             .agg(
                 Present_Days=("Worked_Flag", lambda s: int(s.sum())),
-                Absent_Days=("Is_Absent", lambda s: int(s.sum())),
+                Absent_Marked=("Is_Absent",  lambda s: int(s.sum())),
                 Total_Hours=("Hours","sum"),
                 OT_Days=("OT_Hours", lambda s: int((s>0).sum())),
                 OT_Hours=("OT_Hours","sum"),
                 Base_Cost=("Base_Daily_Cost","sum"),
                 OT_Cost=("OT_Cost","sum"),
                 Total_Cost=("Total_Daily_Cost","sum"),
-            ).reset_index().sort_values(["Project","Employee Name"])
+                Days_Seen=("Day", lambda s: int(pd.Series(s).nunique())),
+            )
+            .reset_index()
         )
+
+        if normalize_30_days:
+            grp["Expected_Days"] = 30
+        else:
+            grp["Expected_Days"] = grp["Days_Seen"]
+
+        grp["Absent_Days"] = (grp["Absent_Marked"] +
+                              (grp["Expected_Days"] - (grp["Present_Days"] + grp["Absent_Marked"])).clip(lower=0))
+
+        attendance_summary = grp.drop(columns=["Absent_Marked","Days_Seen"]) \
+                                .sort_values(["Project","Employee Name"])
 
         # Worked days only (includes P, excludes absent/off/leave)
         work_daily = filt_daily.loc[filt_daily["Worked_Flag"] == True].copy()
@@ -740,7 +743,7 @@ if multi_files:
             fmt_commas(attendance_summary,
                        money_cols=["Base_Cost","OT_Cost","Total_Cost"],
                        hour_cols=["Total_Hours","OT_Hours"],
-                       int_cols=["Present_Days","Absent_Days","OT_Days"]),
+                       int_cols=["Present_Days","Absent_Days","OT_Days","Expected_Days"]),
             use_container_width=True
         )
 
@@ -808,7 +811,7 @@ if multi_files:
                 "Employee_Daily": emp_daily,
                 "Project_Totals": project_totals,
                 "Attendance_Summary": attendance_summary,
-                "Daily_Long_All": work_daily,
+                "Daily_Long_All": filt_daily.loc[filt_daily["Worked_Flag"] == True].copy(),
             }),
             file_name="Timesheet_DailyCost_Filtered.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

@@ -115,7 +115,6 @@ def get_value(row, norm_map, candidates):
     return ""
 
 # ----- payroll column helpers -----
-from openpyxl.utils.cell import column_index_from_string
 def letter_value(row_values, letter, max_cols=None):
     try:
         idx = column_index_from_string(letter) - 1
@@ -139,13 +138,6 @@ def get_absent_days(row, norm_map):
     return num if num is not None else 0
 
 # ========================== PAYSLIP PDF ==========================
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4, LETTER, landscape
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
-from reportlab.platypus.flowables import KeepInFrame, CondPageBreak
-
 def build_pdf_for_row(std, company_name, title, page_size,
                       currency_label="AED", include_words=True, logo_bytes=None, logo_width=1.2*inch) -> bytes:
     buf = io.BytesIO()
@@ -365,6 +357,13 @@ if excel_file:
 st.markdown("---")
 st.subheader("Multi-Project Timesheets — Daily Costing Dashboard")
 
+# NEW: normalize months to 30 attendance days
+normalize_30_days = st.checkbox(
+    "Normalize attendance to 30 days (pad missing days as OFF)",
+    value=True,
+    help="If a month has <30 day columns (e.g., February), synthesize extra OFF days so summaries treat the month as 30 days."
+)
+
 # Unique key here (fixes the duplicate key error)
 multi_files = st.file_uploader(
     "Upload project timesheets (select multiple .xlsx; reads ALL worksheets in each)",
@@ -478,7 +477,8 @@ def fmt_commas(df, money_cols=None, hour_cols=None, int_cols=None, decimals_mone
     fmts.update({c: "{:,.0f}" for c in int_cols})
     return df.style.format(fmts)
 
-def tidy_one_sheet(df_sheet: pd.DataFrame, sheet_name: str, project_from_file: str, default_ot_multiplier: float):
+def tidy_one_sheet(df_sheet: pd.DataFrame, sheet_name: str, project_from_file: str,
+                   default_ot_multiplier: float, normalize_30_days: bool = False):
     dfp2 = promote_day_header_if_needed(df_sheet)
     dfp2.columns = [str(c).strip() for c in dfp2.columns]
     nm = norm_cols_map(dfp2.columns)
@@ -508,6 +508,7 @@ def tidy_one_sheet(df_sheet: pd.DataFrame, sheet_name: str, project_from_file: s
     long.dropna(subset=["Day"], inplace=True)
     long["Day"] = long["Day"].astype(int)
 
+    # --- interpret cell tokens ---
     long["Is_Absent"] = long["CellRaw"].map(is_absent_cell)
     long["Is_Present_Tok"] = long["CellRaw"].map(is_present_token)
     long["Is_Off"] = long["CellRaw"].map(is_off_cell)
@@ -517,17 +518,20 @@ def tidy_one_sheet(df_sheet: pd.DataFrame, sheet_name: str, project_from_file: s
     long = long.sort_values(["Project","Employee Code","Day","Hours"], ascending=[True,True,True,False])
     long = long.drop_duplicates(subset=["Project","Employee Code","Day"], keep="first")
 
+    # --- pay rates ---
     long["Basic"] = pd.to_numeric(long[basic_col], errors="coerce").fillna(0.0) if basic_col in long.columns else 0.0
     if salday_col and salday_col in long.columns:
         long["Salary_Day"] = pd.to_numeric(long[salday_col], errors="coerce")
     else:
+        # Keep salary/day as /30 policy (even for February)
         long["Salary_Day"] = (pd.to_numeric(long[gross_col], errors="coerce")/30.0) if gross_col in long.columns else 0.0
     long["OT_Rate"] = (long["Basic"]/30.0/8.0) * default_ot_multiplier
 
+    # --- OT ---
     ot_threshold = 8.0
     long["OT_Hours"] = (long["Hours"].fillna(0) - ot_threshold).clip(lower=0)
 
-    # Worked day = P OR (Hours>0), and not Absent/Off/Leave/Holiday
+    # Worked = (P or Hours>0) and not absent/off/leave/holiday
     long["Worked_Flag"] = (long["Is_Present_Tok"] | (long["Hours"].fillna(0) > 0)) & (~long["Is_Absent"]) & (~long["Is_Off"])
 
     long["Base_Daily_Cost"] = long["Salary_Day"].where(long["Worked_Flag"], other=0.0)
@@ -540,6 +544,55 @@ def tidy_one_sheet(df_sheet: pd.DataFrame, sheet_name: str, project_from_file: s
         long["Date"] = pd.to_datetime(dict(year=yy, month=mm, day=long["Day"]), errors="coerce")
     except Exception:
         long["Date"] = pd.NaT
+
+    # ===== normalize to 30 attendance days (pad OFF) =====
+    if normalize_30_days:
+        base_keys = long[["Project","Employee Code","Employee Name"]].drop_duplicates()
+        all_days = pd.DataFrame({"Day": list(range(1, 31))})
+        base_keys["_tmp"] = 1
+        all_days["_tmp"] = 1
+        wanted = base_keys.merge(all_days, on="_tmp").drop(columns="_tmp")
+
+        have = long[["Project","Employee Code","Day"]].drop_duplicates()
+        missing = wanted.merge(have, on=["Project","Employee Code","Day"], how="left", indicator=True)
+        missing = missing.loc[missing["_merge"] == "left_only"].drop(columns="_merge")
+
+        if not missing.empty:
+            synth = missing.copy()
+            synth["CellRaw"] = "OFF"
+            synth["Is_Absent"] = False
+            synth["Is_Present_Tok"] = False
+            synth["Is_Off"] = True
+            synth["Hours"] = 0.0
+            synth["OT_Hours"] = 0.0
+            synth["Worked_Flag"] = False
+
+            carry_cols = ["Salary_Day","Basic","OT_Rate"]
+            carry_src = (
+                long[["Project","Employee Code"] + carry_cols]
+                .drop_duplicates(subset=["Project","Employee Code"])
+            )
+            synth = synth.merge(carry_src, on=["Project","Employee Code"], how="left")
+            for c in carry_cols:
+                if c not in synth.columns:
+                    synth[c] = 0.0
+                synth[c] = pd.to_numeric(synth[c], errors="coerce").fillna(0.0)
+
+            synth["Base_Daily_Cost"] = 0.0
+            synth["OT_Cost"] = 0.0
+            synth["Total_Daily_Cost"] = 0.0
+
+            try:
+                synth["Date"] = pd.to_datetime(dict(year=yy, month=mm, day=synth["Day"]), errors="coerce")
+            except Exception:
+                synth["Date"] = pd.NaT
+
+            keep_cols = list(long.columns)
+            for c in keep_cols:
+                if c not in synth.columns:
+                    synth[c] = pd.NA
+
+            long = pd.concat([long, synth[keep_cols]], ignore_index=True)
 
     return long
 
@@ -554,7 +607,8 @@ if multi_files:
                     df_sheet = pd.read_excel(xls, sheet_name=sheet, header=0)
                     if df_sheet.shape[0] == 0 or df_sheet.shape[1] == 0:
                         continue
-                    long = tidy_one_sheet(df_sheet, sheet, project_from_file, default_ot_multiplier)
+                    # pass normalize_30_days into the tidy function
+                    long = tidy_one_sheet(df_sheet, sheet, project_from_file, default_ot_multiplier, normalize_30_days)
                     all_daily.append(long)
                 except Exception as inner_e:
                     st.warning(f"[{project_from_file}] Skipped sheet '{sheet}': {inner_e}")
@@ -721,7 +775,6 @@ if multi_files:
         @st.cache_data
         def to_csv_bytes(df): return df.to_csv(index=False).encode("utf-8")
 
-        # Export-only limited headers for Project_Day_Costs
         if len(work_daily) == 0:
             by_proj_day_export = pd.DataFrame(columns=[
                 "Project","Day","Employees","Hours","OT_Hours",

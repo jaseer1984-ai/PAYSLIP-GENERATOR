@@ -618,8 +618,9 @@ if multi_files:
             min_date = pd.to_datetime(proj_daily["Date"].min()).date()
             max_date = pd.to_datetime(proj_daily["Date"].max()).date()
             c_from, c_to = st.columns(2)
-            date_from = c_from.date_input("From date", value=min_date, min_value=min_date, max_value=max_value, key="from_date")
-            date_to   = c_to.date_input("To date",   value=max_value, min_value=min_date, max_value=max_value, key="to_date")
+            # FIX: use max_date (not max_value)
+            date_from = c_from.date_input("From date", value=min_date, min_value=min_date, max_value=max_date, key="from_date")
+            date_to   = c_to.date_input("To date",   value=max_date, min_value=min_date, max_value=max_date, key="to_date")
             if date_from > date_to: date_from, date_to = date_to, date_from
             mask = proj_daily["Project"].isin(sel_projects) & proj_daily["Date"].between(
                 pd.to_datetime(date_from), pd.to_datetime(date_to)
@@ -672,7 +673,6 @@ if multi_files:
             .reset_index()
         )
 
-        # internal expected days (not shown)
         if normalize_30_days:
             expected_days = 30
             grp["Absent_Days"] = (grp["Absent_Marked"] +
@@ -680,7 +680,6 @@ if multi_files:
         else:
             grp["Absent_Days"] = grp["Absent_Marked"]
 
-        # Arrange columns: Absent_Days immediately after Present_Days
         attendance_summary = grp[[
             "Project","Employee Code","Employee Name",
             "Present_Days","Absent_Days",
@@ -721,7 +720,7 @@ if multi_files:
             by_proj_day["Cum_Total_Cost"] = by_proj_day.groupby("Project")["Total_Cost"].cumsum()
             by_proj_day["Accumulated"]    = by_proj_day["Cum_Total_Cost"]
 
-            # >>> Employee Daily now includes "Month"
+            # Employee Daily includes Month
             emp_daily = (
                 work_daily[[
                     "Project","Employee Code","Employee Name","Month","Day","Hours","OT_Hours",

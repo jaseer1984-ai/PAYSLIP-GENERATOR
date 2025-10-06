@@ -618,8 +618,8 @@ if multi_files:
             min_date = pd.to_datetime(proj_daily["Date"].min()).date()
             max_date = pd.to_datetime(proj_daily["Date"].max()).date()
             c_from, c_to = st.columns(2)
-            date_from = c_from.date_input("From date", value=min_date, min_value=min_date, max_value=max_date, key="from_date")
-            date_to   = c_to.date_input("To date",   value=max_date, min_value=min_date, max_value=max_date, key="to_date")
+            date_from = c_from.date_input("From date", value=min_date, min_value=min_date, max_value=max_value, key="from_date")
+            date_to   = c_to.date_input("To date",   value=max_value, min_value=min_date, max_value=max_value, key="to_date")
             if date_from > date_to: date_from, date_to = date_to, date_from
             mask = proj_daily["Project"].isin(sel_projects) & proj_daily["Date"].between(
                 pd.to_datetime(date_from), pd.to_datetime(date_to)
@@ -672,16 +672,21 @@ if multi_files:
             .reset_index()
         )
 
+        # internal expected days (not shown)
         if normalize_30_days:
-            grp["Expected_Days"] = 30
+            expected_days = 30
+            grp["Absent_Days"] = (grp["Absent_Marked"] +
+                                  (expected_days - (grp["Present_Days"] + grp["Absent_Marked"])).clip(lower=0))
         else:
-            grp["Expected_Days"] = grp["Days_Seen"]
+            grp["Absent_Days"] = grp["Absent_Marked"]
 
-        grp["Absent_Days"] = (grp["Absent_Marked"] +
-                              (grp["Expected_Days"] - (grp["Present_Days"] + grp["Absent_Marked"])).clip(lower=0))
-
-        attendance_summary = grp.drop(columns=["Absent_Marked","Days_Seen"]) \
-                                .sort_values(["Project","Employee Name"])
+        # Arrange columns: Absent_Days immediately after Present_Days
+        attendance_summary = grp[[
+            "Project","Employee Code","Employee Name",
+            "Present_Days","Absent_Days",
+            "Total_Hours","OT_Days","OT_Hours",
+            "Base_Cost","OT_Cost","Total_Cost"
+        ]].sort_values(["Project","Employee Name"])
 
         # Worked days only (includes P, excludes absent/off/leave)
         work_daily = filt_daily.loc[filt_daily["Worked_Flag"] == True].copy()
@@ -693,7 +698,7 @@ if multi_files:
                 "Cum_Hours","Cum_OT_Hours","Cum_Base_Cost","Cum_OT_Cost","Cum_Total_Cost","Accumulated"
             ])
             emp_daily = pd.DataFrame(columns=[
-                "Project","Employee Code","Employee Name","Day","Hours","OT_Hours","Total_Hours",
+                "Project","Employee Code","Employee Name","Month","Day","Hours","OT_Hours","Total_Hours",
                 "Salary_Day","OT_Rate","Base_Daily_Cost","OT_Cost","Total_Daily_Cost","Accumulated"
             ])
             project_totals = pd.DataFrame(columns=["Project","Employees","Total_Work_Hours","Total_OT_Hours","Base_Cost","OT_Cost","Total_Cost"])
@@ -716,9 +721,10 @@ if multi_files:
             by_proj_day["Cum_Total_Cost"] = by_proj_day.groupby("Project")["Total_Cost"].cumsum()
             by_proj_day["Accumulated"]    = by_proj_day["Cum_Total_Cost"]
 
+            # >>> Employee Daily now includes "Month"
             emp_daily = (
                 work_daily[[
-                    "Project","Employee Code","Employee Name","Day","Hours","OT_Hours",
+                    "Project","Employee Code","Employee Name","Month","Day","Hours","OT_Hours",
                     "Salary_Day","OT_Rate","Base_Daily_Cost","OT_Cost","Total_Daily_Cost"
                 ]].sort_values(["Project","Employee Code","Day"])
             )
@@ -743,7 +749,7 @@ if multi_files:
             fmt_commas(attendance_summary,
                        money_cols=["Base_Cost","OT_Cost","Total_Cost"],
                        hour_cols=["Total_Hours","OT_Hours"],
-                       int_cols=["Present_Days","Absent_Days","OT_Days","Expected_Days"]),
+                       int_cols=["Present_Days","Absent_Days","OT_Days"]),
             use_container_width=True
         )
 
@@ -808,7 +814,7 @@ if multi_files:
             "⬇️ Excel Pack (All Tabs)",
             data=to_xlsx_bytes({
                 "Project_Day_Costs": by_proj_day_export,
-                "Employee_Daily": emp_daily,
+                "Employee_Daily": emp_daily,  # includes Month
                 "Project_Totals": project_totals,
                 "Attendance_Summary": attendance_summary,
                 "Daily_Long_All": filt_daily.loc[filt_daily["Worked_Flag"] == True].copy(),

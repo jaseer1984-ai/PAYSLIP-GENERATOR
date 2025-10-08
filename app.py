@@ -38,6 +38,7 @@ EARNINGS_LETTERS = {
     "Basic Pay": "F",
     "Other Allowance": "G",
     "Housing Allowance": "H",
+    "Repay Extra Leave Punishment / Other Ded": "AC",
     "Over time": "AK",
     "Reward for Full Day Attendance": "AD",
     "Incentive": "AE",
@@ -182,7 +183,7 @@ def build_pdf_for_row(std, company_name, title, page_size,
     elems += [hdr_tbl, Spacer(1,6)]
 
     earn_rows = [[f"Earnings ({currency_label})","Amount"]]
-    for lbl in ["Basic Pay","Other Allowance","Housing Allowance","Over time","Reward for Full Day Attendance","Incentive"]:
+    for lbl in ["Basic Pay","Other Allowance","Housing Allowance","Repay Extra Leave Punishment / Other Ded","Over time","Reward for Full Day Attendance","Incentive"]:
         earn_rows.append([lbl, fmt_amount(std.get(lbl,0),2)])
     earn_rows.append(["Total Earnings", fmt_amount(std.get("Total Earnings (optional)",0),2)])
     earn_tbl = Table(earn_rows, colWidths=[3.6*inch,1.4*inch], repeatRows=1)
@@ -841,3 +842,4 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+

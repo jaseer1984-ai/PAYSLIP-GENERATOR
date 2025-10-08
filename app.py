@@ -38,11 +38,22 @@ EARNINGS_LETTERS = {
     "Basic Pay": "F",
     "Other Allowance": "G",
     "Housing Allowance": "H",
-    "Repay Extra Leave Punishment / Other Ded": "AC",
+    "Repay Extra Leave Punishment / Other Ded": "AC",  # NEW
     "Over time": "AK",
     "Reward for Full Day Attendance": "AD",
     "Incentive": "AE",
 }
+# Single source of truth for display order in earnings table
+EARNINGS_ORDER = [
+    "Basic Pay",
+    "Other Allowance",
+    "Housing Allowance",
+    "Repay Extra Leave Punishment / Other Ded",
+    "Over time",
+    "Reward for Full Day Attendance",
+    "Incentive",
+]
+
 DEDUCTIONS_LETTERS = {
     "Absent Pay": ["AJ"],
     "Extra Leave Punishment Ded": ["R"],
@@ -182,8 +193,9 @@ def build_pdf_for_row(std, company_name, title, page_size,
     ]))
     elems += [hdr_tbl, Spacer(1,6)]
 
+    # Earnings table (uses EARNINGS_ORDER to avoid any label mismatch)
     earn_rows = [[f"Earnings ({currency_label})","Amount"]]
-    for lbl in ["Basic Pay","Other Allowance","Housing Allowance","Repay Extra Leave Punishment / Other Ded","Over time","Reward for Full Day Attendance","Incentive"]:
+    for lbl in EARNINGS_ORDER:
         earn_rows.append([lbl, fmt_amount(std.get(lbl,0),2)])
     earn_rows.append(["Total Earnings", fmt_amount(std.get("Total Earnings (optional)",0),2)])
     earn_tbl = Table(earn_rows, colWidths=[3.6*inch,1.4*inch], repeatRows=1)
@@ -196,6 +208,7 @@ def build_pdf_for_row(std, company_name, title, page_size,
         ("FONTNAME",(0,0),(0,0),"Helvetica-Bold"), ("FONTNAME",(0,-1),(1,-1),"Helvetica-Bold"),
     ]))
 
+    # Deductions table
     ded_rows = [[f"Deductions ({currency_label})","Amount"]]
     for lbl in ["Absent Pay","Extra Leave Punishment Ded","Air Ticket Deduction","Other Fine Ded",
                 "Medical Deduction","Mob Bill Deduction","I LOE Insurance Deduction","Sal Advance Deduction"]:
@@ -288,20 +301,26 @@ def build_std_for_row(row_series, row_vals, norm_map, max_cols, pay_period_text=
         "Pay Period": pay_period,
         "Absent Days": absent_days,
     }
+    # Pull earnings and deductions from letters
     for lbl, L in EARNINGS_LETTERS.items():
         std[lbl] = parse_number(letter_value(row_vals, L, max_cols)) or 0.0
     for lbl, Ls in DEDUCTIONS_LETTERS.items():
         std[lbl] = sum_letters(row_vals, Ls, max_cols)
 
-    te = parse_number(letter_value(row_vals, TOTAL_EARNINGS_LETTER, max_cols))
-    td = parse_number(letter_value(row_vals, TOTAL_DEDUCTIONS_LETTER, max_cols))
-    npay = parse_number(letter_value(row_vals, NET_PAY_LETTER, max_cols))
-    if te is None:
-        te = sum(std.get(k, 0.0) for k in EARNINGS_LETTERS.keys())
-    if td is None:
-        td = sum(std.get(k, 0.0) for k in DEDUCTIONS_LETTERS.keys())
-    if npay is None:
-        npay = te - td
+    # Sheet totals (if present)
+    te_sheet = parse_number(letter_value(row_vals, TOTAL_EARNINGS_LETTER, max_cols))
+    td_sheet = parse_number(letter_value(row_vals, TOTAL_DEDUCTIONS_LETTER, max_cols))
+    npay_sheet = parse_number(letter_value(row_vals, NET_PAY_LETTER, max_cols))
+
+    # Calculated totals from our standard dict (ensures AC is included)
+    te_calc = sum(std.get(k, 0.0) for k in EARNINGS_LETTERS.keys())
+    td_calc = sum(std.get(k, 0.0) for k in DEDUCTIONS_LETTERS.keys())
+
+    # Prefer sheet values only if they match our calc closely; else use calc
+    tol = 0.01
+    te = te_sheet if (te_sheet is not None and abs(te_sheet - te_calc) <= tol) else te_calc
+    td = td_sheet if (td_sheet is not None and abs(td_sheet - td_calc) <= tol) else td_calc
+    npay = npay_sheet if (npay_sheet is not None and abs(npay_sheet - (te - td)) <= tol) else (te - td)
 
     std["Total Earnings (optional)"] = te
     std["Total Deductions (optional)"] = td
@@ -728,7 +747,6 @@ if multi_files:
             )
             emp_daily["Total_Hours"] = emp_daily["Hours"].fillna(0) + emp_daily["OT_Hours"].fillna(0)
             emp_daily["Accumulated"] = emp_daily.groupby(["Project","Employee Code"])["Total_Daily_Cost"].cumsum()
-            # Reorder columns so Total_Hours is right after OT_Hours
             emp_daily = emp_daily[[
                 "Project","Employee Code","Employee Name","Month","Day",
                 "Hours","OT_Hours","Total_Hours",
@@ -842,4 +860,3 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-

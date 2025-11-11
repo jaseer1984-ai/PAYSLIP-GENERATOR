@@ -50,8 +50,8 @@ EARNINGS_ORDER = [
     "Housing Allowance",
     "Repay Extra Leave Punishment / Other Ded",
     "Over time",
-    "Reward for Full Day Attendance",
-    "Incentive",
+    "Reward for Full Day Attendance / Pending Salary",
+    "Incentive / Vacation Salary",
 ]
 
 DEDUCTIONS_LETTERS = {
@@ -860,3 +860,4 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+

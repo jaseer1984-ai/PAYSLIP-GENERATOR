@@ -40,8 +40,8 @@ EARNINGS_LETTERS = {
     "Housing Allowance": "H",
     "Repay Extra Leave Punishment / Other Ded": "AC",  # NEW
     "Over time": "AK",
-    "Reward for Full Day Attendance": "AD",
-    "Incentive": "AE",
+    "Reward for Full Day Attendance / Pending Salary": "AD",
+    "Incentive / Vacation Salary": "AE",
 }
 # Single source of truth for display order in earnings table
 EARNINGS_ORDER = [
@@ -860,4 +860,5 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
 
